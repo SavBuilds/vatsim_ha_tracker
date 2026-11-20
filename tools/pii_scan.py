@@ -154,7 +154,10 @@ def scan_git(root, patterns, rules, out, skip_names=()):
         text = data.decode("utf-8", "replace")
         if kind != "blob":
             text = commit_text(text)
-        scan_text(f"{name or kind}@git:{sha[:10]}", text, patterns, rules, out)
+        # A tag object is listed with its tag name; label it "commit" so the
+        # same allow rules cover author, committer and tagger lines.
+        label = name if kind == "blob" else "commit"
+        scan_text(f"{label}@git:{sha[:10]}", text, patterns, rules, out)
     return seen
 
 

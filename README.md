@@ -4,7 +4,7 @@ Know when ATC comes online along your route before you call them. This AppDaemon
 
 ![Dashboard main view: flight status, radios, ATIS, telemetry and session map](docs/images/dashboard_main.png)
 
-*Illustration with sample data, not a capture. The callsign, airports, controllers and coastline are invented.*
+*Captured in flight. The callsign is replaced with a placeholder; nothing else is altered. Taken on a development build: the METAR line in the ATIS card is not in `v1.0.0-rc2`.*
 
 ---
 
@@ -45,7 +45,7 @@ Know when ATC comes online along your route before you call them. This AppDaemon
 
 ![Dashboard alerts view: alert mode, alert toggles and speaker targets](docs/images/dashboard_alerts.png)
 
-*Illustration with sample data.*
+*Captured from a running install. The speaker buttons are whatever you configure; the example config ships two.*
 
 **Health and watchdogs**
 - `sensor.vatsim_feed_health` reports feed age, boundary, navdata and NAT track status, the navdata AIRAC cycle and its expiry, and the last refresh errors.
