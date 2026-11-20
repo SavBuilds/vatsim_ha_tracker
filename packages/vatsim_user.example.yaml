@@ -1,0 +1,83 @@
+# VATSIM ATC Tracker: your settings.
+#
+# Copy this file to packages/vatsim_user.yaml and edit the four marked places.
+# packages/vatsim.yaml (the logic) calls what is defined here and is never
+# edited, so a newer release of that file leaves your settings alone.
+
+# 1. SPEAKER TOGGLES -------------------------------------------------------
+# One input_boolean per speaker you may want announcements on. The dashboard
+# shows these as switches. Add, rename or remove freely, then list each one in
+# the speaker map in section 4.
+input_boolean:
+  vatsim_speaker_1:
+    name: Announce - Speaker 1
+    icon: mdi:speaker
+
+  vatsim_speaker_2:
+    name: Announce - Speaker 2
+    icon: mdi:speaker
+
+# 2. MUTE GATE (optional) --------------------------------------------------
+# Leave initial blank for no gate. To hold VATSIM speech while something else
+# has priority, put that entity id here (any entity whose state is on/off,
+# for example a binary_sensor). Speech then plays only while it reads off.
+# A gate that is unavailable holds speech and is reported after 15 minutes.
+# The value is re-applied from this file at every Home Assistant start.
+input_text:
+  vatsim_mute_gate:
+    name: VATSIM mute gate entity (blank = none)
+    icon: mdi:volume-off
+    min: 0
+    max: 100
+    initial: ""
+
+script:
+  # 3. WHERE PUSHES GO -----------------------------------------------------
+  # Every push from the package goes through this one script: alert pushes,
+  # and the health and watchdog pushes. The health pushes call it directly,
+  # not through the alert mode, so setting alerts to Disabled never hides a
+  # failure.
+  vatsim_notify:
+    alias: "VATSIM: send push"
+    mode: queued
+    max: 10
+    fields:
+      title:
+        description: Notification title
+      message:
+        description: Notification text
+      tag:
+        description: Optional. Pushes with the same tag replace each other (mobile app only)
+    sequence:
+      # Default: a notice in the Home Assistant sidebar, which works on every
+      # install. For your phone, change the action to notify.mobile_app_<device>.
+      - action: notify.persistent_notification
+        data:
+          title: "{{ title | default('VATSIM') }}"
+          message: "{{ message }}"
+          # Mobile app only. Uncomment so repeat outage pushes replace each
+          # other and do not alert twice:
+          # data: "{{ {'tag': tag, 'alert_once': true} if tag is defined and tag else {} }}"
+
+  # 4. SPEAKERS AND TTS ----------------------------------------------------
+  # The package's alert automations call this script. It hands your speaker
+  # map and TTS engine to the logic in vatsim.yaml.
+  vatsim_announce:
+    alias: "VATSIM: announce to selected speakers"
+    mode: parallel
+    fields:
+      title:
+        description: Optional push title
+      message:
+        description: Text to send/speak
+    sequence:
+      - action: script.vatsim_announce_core
+        data:
+          title: "{{ title | default('VATSIM Alert') }}"
+          message: "{{ message }}"
+          # Your TTS entity (Settings > Voice assistants, or Developer Tools > States, filter "tts.").
+          tts_engine: tts.google_translate_en_com
+          # speaker toggle from section 1: the media_player it controls
+          speakers:
+            input_boolean.vatsim_speaker_1: media_player.example_speaker_1
+            input_boolean.vatsim_speaker_2: media_player.example_speaker_2

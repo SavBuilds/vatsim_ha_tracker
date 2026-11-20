@@ -1,0 +1,8 @@
+# Accepted hits for tools/pii_scan.py:  path-glob<TAB>pattern-or-seed<TAB>regex the line must match
+apps/vatsim_atc_tracker/vatsim_atc_tracker.py	key-assignment	_published_tokens\.get|No token: AppDaemon restarted
+packages/vatsim_user.example.yaml	media_player	media_player\.example_speaker_[12]\b
+packages/vatsim_user.example.yaml	notify-target	notify\.(persistent_notification|mobile_app_<device>)
+packages/vatsim_user.example.yaml	mobile_app	notify\.mobile_app_<device>
+commit	email	^(author|committer) .* <\d+\+[A-Za-z0-9-]+@users\.noreply\.github\.com>
+README.md	notify-target	notify\.mobile_app_<device>
+README.md	mobile_app	notify\.mobile_app_<device>
