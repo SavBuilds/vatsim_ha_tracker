@@ -2,6 +2,10 @@
 
 Know when ATC comes online along your route before you call them. This AppDaemon app watches the live VATSIM network for your pilot connection. It publishes Home Assistant entities for your position, the ATC coverage you are in, the sector you are about to enter and when, your filed route drawn on a map, the ATIS at your departure or arrival, and the controller boundaries online right now. Optional spoken and push alerts go where you choose.
 
+![Dashboard main view: flight status, radios, ATIS, telemetry and session map](docs/images/dashboard_main.png)
+
+*Illustration with sample data, not a capture. The callsign, airports, controllers and coastline are invented.*
+
 ---
 
 ## Features
@@ -38,6 +42,10 @@ Know when ATC comes online along your route before you call them. This AppDaemon
 - An alert mode selector (`Disabled`, `Push + Speaker`, `Push Only`, `Speaker Only`) with a one-tap cycle script.
 - Per-speaker toggles.
 - An optional mute gate: name any on/off entity and VATSIM speech plays only while it reads `off`.
+
+![Dashboard alerts view: alert mode, alert toggles and speaker targets](docs/images/dashboard_alerts.png)
+
+*Illustration with sample data.*
 
 **Health and watchdogs**
 - `sensor.vatsim_feed_health` reports feed age, boundary, navdata and NAT track status, the navdata AIRAC cycle and its expiry, and the last refresh errors.
