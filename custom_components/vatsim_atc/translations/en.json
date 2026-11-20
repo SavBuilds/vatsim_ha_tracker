@@ -1,0 +1,56 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "VATSIM ATC Tracker",
+        "description": "Enter the VATSIM CID of the pilot to follow. No VATSIM login or API key is used.",
+        "data": {
+          "vatsim_cid": "VATSIM CID"
+        }
+      }
+    },
+    "error": {
+      "invalid_cid": "A CID is 5 to 8 digits."
+    },
+    "abort": {
+      "already_configured": "This CID is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "VATSIM ATC Tracker options",
+        "description": "All optional. Paths are as Home Assistant sees them, for example /config/vatsim/navdata.",
+        "data": {
+          "navdata_path": "Navigation data folder (X-Plane 12 format)",
+          "simaware_boundaries_path": "SimAware TRACON boundaries file or folder",
+          "lookahead_minutes": "Lookahead (minutes)",
+          "metar_fallback": "Show the METAR when an airport has no ATIS"
+        }
+      }
+    },
+    "error": {
+      "path_not_found": "Home Assistant cannot see that path."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "pilot_connected": { "name": "Pilot connected" },
+      "atc_coverage": { "name": "ATC coverage" }
+    },
+    "device_tracker": {
+      "aircraft": { "name": "Aircraft" }
+    },
+    "sensor": {
+      "feed_health": { "name": "Feed health" },
+      "next_sector": { "name": "Next sector" },
+      "destination": { "name": "Destination" },
+      "online_atc_boundaries": { "name": "Online ATC boundaries" },
+      "flight_route": { "name": "Flight route" },
+      "session_track": { "name": "Session track" }
+    },
+    "text": {
+      "atis_airport": { "name": "ATIS airport" }
+    }
+  }
+}

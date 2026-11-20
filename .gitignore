@@ -2,20 +2,18 @@
 tools/pii_seeds.local.txt
 *.local.*
 private/
+secrets.yaml
+*.last_aircraft.json
 vatsim_last_aircraft.json
 vatsim_last_aircraft.json.tmp
-secrets.yaml
 # Navigation data is user-supplied and must not be redistributed.
 *.dat
 cycle.json
 cycle_info.txt
 navdata/
 simaware/
-__pycache__/
-*.pyc
-# Dry-run cache: a full feed snapshot with other pilots in it.
-dryrun-cache/
-.dryrun-cache/
 # SimAware boundaries (CC BY-SA 4.0): build locally with tools/build_simaware.py, never commit.
 TRACONBoundaries.geojson
 simaware-tracon-project/
+__pycache__/
+*.pyc

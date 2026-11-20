@@ -1,0 +1,179 @@
+"""The Home Assistant side of the integration, driven through stand-ins (see ha_stubs.py for
+what that does and does not prove). The engine, worker threads and timers underneath are real."""
+import asyncio
+import importlib
+import json
+import os
+import sys
+import tempfile
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.join(HERE, "..")
+sys.path.insert(0, HERE)
+sys.path.insert(0, ROOT)
+import ha_stubs  # noqa: E402
+import scenario as a  # noqa: E402
+
+DISPATCHER = ha_stubs.install()
+integration = importlib.import_module("custom_components.vatsim_atc")
+engine = importlib.import_module("custom_components.vatsim_atc.core.engine")
+const = importlib.import_module("custom_components.vatsim_atc.const")
+
+
+class _Response:
+    def __init__(self, text):
+        self._text = text
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def raise_for_status(self):
+        pass
+
+    async def text(self):
+        return self._text
+
+
+class _Session:
+    def __init__(self):
+        self.headers_seen = []
+
+    def get(self, url, headers=None, timeout=None):
+        self.headers_seen.append(headers)
+        return _Response(a.serve(url, a.feed(23.0)))
+
+
+class _Hass:
+    def __init__(self, loop, folder):
+        self.loop, self.session, self.entities, self.stop_listeners = loop, _Session(), [], []
+        outer = self
+        self.config = type("C", (), {"path": staticmethod(lambda *p: os.path.join(folder, *p))})()
+        self.bus = type("B", (), {"async_listen_once": staticmethod(
+            lambda event, cb: outer.stop_listeners.append((event, cb)) or (lambda: None))})()
+        self.services = type("S", (), {"async_call": staticmethod(lambda *a_, **k: asyncio.sleep(0))})()
+
+        class Entries:
+            async def async_forward_entry_setups(self, entry, platforms):
+                for platform in platforms:
+                    module = importlib.import_module(f"custom_components.vatsim_atc.{platform.value}")
+                    found = []
+                    await module.async_setup_entry(outer, entry, lambda ents: found.extend(ents))
+                    for entity in found:
+                        entity.hass = outer
+                        entity.platform_name = platform.value
+                        await entity.async_added_to_hass()
+                    outer.entities.extend(found)
+
+            async def async_unload_platforms(self, entry, platforms):
+                return True
+        self.config_entries = Entries()
+
+    async def async_add_executor_job(self, func, *args):
+        return await self.loop.run_in_executor(None, func, *args)
+
+
+async def until(predicate, seconds=15.0):
+    for _ in range(int(seconds / 0.02)):
+        if predicate():
+            return True
+        await asyncio.sleep(0.02)
+    return False
+
+
+class Glue(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.makedirs(os.path.join(self.tmp.name, ".storage"))
+        self.hass = _Hass(asyncio.get_running_loop(), self.tmp.name)
+        self._jitter = engine.POLL_JITTER_SECONDS
+        engine.POLL_JITTER_SECONDS = 0.0
+        # The CID is the only thing a user enters; the rest stands in for the public data sources.
+        self._args = const.engine_args
+        const_args = lambda data, options: {**self._args(data, options), "vatspy_boundaries_url": a.BOUNDARIES_URL,  # noqa: E731
+                                            "vatspy_dat_url": a.DAT_URL, "poll_interval_seconds": 0.15}
+        integration.engine_args = const_args
+        self.entry = ha_stubs.ConfigEntry("entry1", {"vatsim_cid": "1234567"}, {"metar_fallback": False})
+        self.assertTrue(await integration.async_setup_entry(self.hass, self.entry))
+        self.by_key = {e._attr_translation_key: e for e in self.hass.entities}
+
+    async def asyncTearDown(self):
+        await integration.async_unload_entry(self.hass, self.entry)
+        DISPATCHER.targets.clear()   # the stand-in platform unload does not disconnect entities
+        engine.POLL_JITTER_SECONDS = self._jitter
+        integration.engine_args = self._args
+        self.tmp.cleanup()
+
+    async def test_entities_show_what_the_engine_publishes(self):
+        e = self.by_key
+        self.assertEqual(len(self.hass.entities), 10)
+        self.assertFalse(e["next_sector"].available)   # nothing published yet
+        self.assertTrue(await until(lambda: e["next_sector"].extra_state_attributes.get("next_controller_callsign")))
+        self.assertEqual(e["feed_health"].native_value, "healthy")
+        self.assertIs(e["pilot_connected"].is_on, True)
+        self.assertIs(e["atc_coverage"].is_on, True)
+        self.assertEqual(e["atc_coverage"].extra_state_attributes["controller_callsign"], "ZZA_CTR")
+        self.assertEqual((e["aircraft"].latitude, e["aircraft"].longitude), (10.0, 23.0))
+        self.assertEqual(e["next_sector"].extra_state_attributes["eta_text"], "7 min")
+        for entity in self.hass.entities:
+            if entity is e["atis_airport"]:
+                continue
+            attrs = entity.extra_state_attributes
+            self.assertFalse({"pub_token", "friendly_name"} & set(attrs), entity._attr_translation_key)
+            self.assertGreater(entity.__dict__.get("writes", 0), 0, entity._attr_translation_key)
+        self.assertFalse({"latitude", "longitude"} & set(e["aircraft"].extra_state_attributes))
+        self.assertIn("callsign", e["aircraft"].extra_state_attributes)
+
+    async def test_unique_ids_and_names(self):
+        ids = [e._attr_unique_id for e in self.hass.entities]
+        self.assertEqual(len(ids), len(set(ids)))
+        with open(os.path.join(ROOT, "custom_components", "vatsim_atc", "translations", "en.json"), encoding="utf-8") as fh:
+            names = json.load(fh)["entity"]
+        for entity in self.hass.entities:
+            self.assertIn(entity._attr_translation_key, names[entity.platform_name])
+        self.assertEqual(sum(len(v) for v in names.values()), len(self.hass.entities))
+
+    async def test_typed_airport_drives_the_destination(self):
+        e = self.by_key
+        self.assertTrue(await until(lambda: e["destination"].available))
+        await e["atis_airport"].async_set_value(" zzdd ")
+        self.assertEqual(e["atis_airport"]._attr_native_value, "ZZDD")
+        self.assertTrue(await until(lambda: e["destination"].native_value == "selected"))
+
+    async def test_user_agent_and_save_file(self):
+        self.assertTrue(await until(lambda: self.by_key["pilot_connected"].is_on))
+        self.assertTrue(all(h and "vatsim_ha_tracker/" in h["User-Agent"] for h in self.hass.session.headers_seen))
+        self.assertEqual(self.hass.stop_listeners[0][0], "homeassistant_stop")
+        await self.hass.stop_listeners[0][1](None)      # Home Assistant stopping
+        saved = os.path.join(self.tmp.name, ".storage", "vatsim_atc.entry1.last_aircraft.json")
+        self.assertTrue(os.path.exists(saved))
+        await integration.async_remove_entry(self.hass, self.entry)
+        self.assertFalse(os.path.exists(saved))
+
+    async def test_restored_airport_is_sanitised(self):
+        text = importlib.import_module("custom_components.vatsim_atc.text")
+        box = text.AtisAirportText(self.entry, self.entry.runtime_data)
+        box.hass = self.hass
+        box.last_state = type("S", (), {"state": "not an airport"})()
+        await box.async_added_to_hass()
+        self.assertEqual(box._attr_native_value, "")
+        box.last_state = type("S", (), {"state": "kbos"})()
+        await box.async_added_to_hass()
+        self.assertEqual(box._attr_native_value, "KBOS")
+
+
+class BadConfig(unittest.IsolatedAsyncioTestCase):
+    async def test_placeholder_cid_fails_setup_cleanly(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hass = _Hass(asyncio.get_running_loop(), folder)
+            entry = ha_stubs.ConfigEntry("entry2", {"vatsim_cid": "0"})
+            with self.assertRaises(sys.modules["homeassistant.exceptions"].ConfigEntryError):
+                await integration.async_setup_entry(hass, entry)
+            self.assertEqual(hass.entities, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

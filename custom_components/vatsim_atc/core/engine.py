@@ -1,90 +1,31 @@
-"""
-vatsim_atc_tracker.py
+"""The tracker engine: everything the integration knows about VATSIM, with no Home Assistant in it.
 
-AppDaemon app implementing the four-entity VATSIM ATC coverage state model
-described in the README (see 'How it works'):
+Each poll it reads the public VATSIM data feed, finds one pilot by CID, and works out:
 
-  - sensor.vatsim_feed_health         : is the VATSIM data feed trustworthy right now?
-  - binary_sensor.vatsim_pilot_connected : are you actually present in the feed?
-  - binary_sensor.vatsim_atc_coverage    : current sector identity (debounced)
-  - sensor.vatsim_next_sector            : projected sector identity ~N minutes out
-  - sensor.vatsim_online_atc_boundaries  : ALL currently online CTR/FSS/APP/DEP
-                                            boundary polygons, for map display -
-                                            not just the one covering the aircraft.
-  - sensor.vatsim_flight_route           : the pilot's OWN filed flight plan route,
-                                            resolved to real coordinates via local
-                                            X-Plane-format navdata (earth_fix.dat /
-                                            earth_nav.dat / earth_awy.dat /
-                                            earth_aptmeta.dat), for map display.
-                                            Sourced entirely from VATSIM's own feed
-                                            (pilot.flight_plan.route/departure/
-                                            arrival) - this app never talks to
-                                            Simbrief or any other flight-planning
-                                            service. Anchored at the actual
-                                            departure/arrival airport coordinates
-                                            (via earth_aptmeta.dat) when available,
-                                            not just the nearest en-route waypoint.
+  - presence, debounced, so one missed poll is not a disconnect;
+  - the controller covering the aircraft now, from VAT-Spy centre and FSS boundaries and,
+    optionally, SimAware approach and departure boundaries;
+  - the next controlled sector along the projected track, with a distance and an ETA;
+  - the filed route as a line, resolved against navigation data the user supplies, with
+    North Atlantic Tracks expanded from natTrak;
+  - the ATIS at the departure, the arrival or a chosen airport, or its METAR when no ATIS
+    is online;
+  - a GeoJSON layer of every online controller's boundary, and the session's track.
 
-Design decisions preserved from the architecture document (not simplified here):
-  - Feed health and pilot presence are tracked as separate state machines.
-  - Current/next sector identity is debounced on (mode, controller_callsign,
-    polygon_id), never on a plain boolean, so a controller handoff while
-    remaining continuously "controlled" still publishes a clean update.
-  - The APP/DEP altitude gate (app_dep_altitude_gate_ft) is a single global
-    value, not a per-FIR/jurisdiction lookup: above it, the pilot is
-    treated as "clearly in cruise" and APP/DEP/TRACON-style coverage is
-    ignored entirely; below it, APP/DEP is considered normally. This is a
-    deliberate product heuristic for suppressing terminal-coverage noise
-    during cruise, not an operational transition-altitude model, and it
-    does not depend on CTR/FSS jurisdiction resolution in any way.
-  - Ambiguous vertical trend excludes APP/DEP from a projected point only;
-    it never suppresses CTR/FSS lookahead.
-  - next-sector "skip" states (low groundspeed / unstable heading /
-    insufficient heading history) bypass identity debounce and publish
-    immediately, by deliberate design choice described in the doc's
-    Debounce Scope section. Unstable heading and insufficient history are
-    tracked as DISTINCT skip states - insufficient history (not enough
-    samples yet, e.g. right after startup or a presence-gap history clear)
-    is not evidence of an actual heading swing, and conflating the two
-    previously caused false "unstable heading" reports whenever history
-    was merely thin.
-  - Shapely's covers() is used everywhere instead of contains(), with no
-    default buffering/tolerance expansion.
-  - Geometry is loaded and prepared off the main thread and swapped in via
-    a single atomic reference assignment; nothing mutates live geometry
-    in place. Navdata (fixes/navaids/airways/airports) follows the
-    identical pattern via a separate NavDataSnapshot, loaded/refreshed
-    independently of VATSpy/SimAware boundary geometry.
-  - Boundary polygons for the CURRENT and NEXT covering sector are
-    published as GeoJSON strings (see _geometry_to_geojson_str) so a map
-    card can render them - simplified for display only; the ORIGINAL,
-    un-simplified geometry objects (feature.geometry / prepared geometry)
-    used for covers() resolution are never touched by this simplification.
-  - Separately, EVERY online CTR/FSS/APP/DEP controller's resolved
-    boundary (not just the one covering the aircraft) is published each
-    poll cycle as a GeoJSON FeatureCollection on
-    sensor.vatsim_online_atc_boundaries, for a "show all active ATC on
-    the map" display. Deduplicated by boundary/polygon id, since VATSpy's
-    known duplicate-prefix rows (see _parse_vatspy_dat_firs) can otherwise
-    resolve the same polygon twice under different candidate prefixes.
-  - Route resolution (_resolve_route_to_points) is a best-effort,
-    fail-soft parse of a free-text ICAO route string - it is NOT a
-    certified flight-planning tool. Airway segments are traversed via
-    plain BFS over an undirected adjacency graph (direction restrictions
-    in earth_awy.dat are intentionally not enforced - this app draws a
-    line for situational awareness, it doesn't file or validate routes).
-    Unresolvable tokens (SID/STAR procedure names, speed/altitude tokens
-    like N0450F350, etc.) are skipped and counted, never guessed at.
-    Departure/arrival airport coordinates (from earth_aptmeta.dat) are
-    resolved independently and prepended/appended to the route line when
-    available, so the line anchors at the real airport rather than just
-    the nearest en-route waypoint. earth_aptmeta.dat has a DIFFERENT
-    column layout than earth_fix.dat/earth_nav.dat (ident-first, not
-    lat/lon-first - see _parse_navdata_airport_file), so it gets its own
-    dedicated parser rather than reusing _parse_navdata_coord_file. Only
-    recomputed when the filed route string (or departure/arrival)
-    actually changes, not every poll cycle, since parsing is nontrivially
-    more expensive than the rest of the poll cycle's work.
+Results are published through Host.set_state as (entity id, state, attributes). The entity
+ids used here are internal keys; the integration maps them to its own entities.
+
+Design notes that are easy to break:
+
+  - Boundaries, navdata and NAT tracks are loaded on worker threads into immutable snapshots
+    and swapped in on the host loop with run_in(..., 0). The poll never sees a half-loaded set.
+  - A failed load keeps the previous snapshot and records the error on the health state. It
+    never replaces good data with an empty set.
+  - Everything is fail-soft and reports through the feed-health state, so a watchdog can see
+    what a log line would hide.
+  - Geometry is geo.py: spherical distances and plain ray casting. No compiled dependency.
+
+The engine is a mixin. See Host below for what it needs from whatever runs it.
 """
 
 import glob
@@ -100,36 +41,73 @@ from collections import ChainMap, deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-import requests
-from geopy.distance import distance as geopy_distance
-from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPoint, Point, mapping, shape
-from shapely.prepared import prep
+from .. import geo
 
-import appdaemon.plugins.hass.hassapi as hass
+
+class FetchError(Exception):
+    """A download failed. Raised by Host.http_get for a network error, a timeout or an HTTP error status."""
+
+    def __init__(self, message: str, kind: str = "FetchError", is_timeout: bool = False) -> None:
+        super().__init__(message)
+        self.kind = kind              # class name of the underlying error, kept for the health attributes
+        self.is_timeout = is_timeout  # a read timeout, which the feed check reports separately
+
+
+class Host:
+    """What the engine needs from whatever runs it. The engine is a mixin: combine it with a
+    concrete host, engine first, so the engine's set_state wraps the host's.
+
+        class Tracker(VatsimAtcEngine, MyHost): ...
+
+    Threading contract: log, run_in and http_get may be called from worker threads. Everything
+    else is called only from the host's own loop, and callbacks given to run_in, run_every and
+    listen_state must be run on that loop."""
+
+    args: Dict[str, Any]
+
+    def log(self, message: str, level: str = "INFO", **kwargs: Any) -> None:
+        raise NotImplementedError
+
+    def set_state(self, entity_id: str, **kwargs: Any) -> Any:
+        """Publish state= and attributes= for one entity."""
+        raise NotImplementedError
+
+    def get_state(self, entity_id: Optional[str] = None, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    def render_template(self, template: str, **kwargs: Any) -> Any:
+        """Rendered text, or None when the host cannot answer."""
+        raise NotImplementedError
+
+    def call_service(self, service: str, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    def run_in(self, callback: Any, delay: float, **kwargs: Any) -> Any:
+        """Call callback(kwargs) on the host loop after delay seconds. Delay 0 is a thread hand-off."""
+        raise NotImplementedError
+
+    def run_every(self, callback: Any, start: Any, interval: float, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    def listen_state(self, callback: Any, entity_id: str, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    def datetime(self) -> datetime:
+        raise NotImplementedError
+
+    def http_get(self, url: str, timeout: float, headers: Optional[Dict[str, str]] = None) -> str:
+        """Body text of a successful GET. Raises FetchError otherwise. Blocking; called from threads
+        and, for the feed, from the poll."""
+        raise NotImplementedError
 
 
 # --------------------------------------------------------------------------
 # Constants
 # --------------------------------------------------------------------------
 
-__version__ = "1.0.0"
-
-# Sent on every outbound request so the data publishers can tell what is
-# calling them. Holds nothing about the user or the install.
-PROJECT_URL = "https://github.com/SavBuilds/vatsim_ha_tracker"
-HTTP_HEADERS = {"User-Agent": f"vatsim_ha_tracker/{__version__} (+{PROJECT_URL})"}
-
-# Fallback feed URL. VATSIM asks clients to read the current URL from the
-# status document instead of hard-coding it, so this is used only until that
-# lookup succeeds (see _resolve_feed_url) or when vatsim_status_url is disabled.
 VATSIM_FEED_URL = "https://data.vatsim.net/v3/vatsim-data.json"
-DEFAULT_VATSIM_STATUS_URL = "https://status.vatsim.net/status.json"
-# A feed URL from the status document is accepted only on a vatsim.net host.
-FEED_URL_ALLOWED_RE = re.compile(r"^https://[a-z0-9.-]+\.vatsim\.net/", re.IGNORECASE)
-# The feed regenerates about every 15 s; polling faster only repeats the same data.
-MIN_USEFUL_POLL_INTERVAL_SECONDS = 15
 
 FACILITY_FSS = 1
 FACILITY_APP_DEP = 5
@@ -157,9 +135,6 @@ DEFAULT_NAVDATA_REFRESH_INTERVAL_DAYS = 30
 # Files whose change triggers a navdata reload, and how often to look.
 NAVDATA_SOURCE_FILES = ("cycle.json", "cycle_info.txt", "earth_fix.dat", "earth_nav.dat",
                         "earth_awy.dat", "earth_aptmeta.dat")
-# The files route plotting reads. A navdata_path holding none of them is a
-# configuration error and is reported loudly (see _load_navdata_worker_body).
-NAVDATA_REQUIRED_FILES = ("earth_fix.dat", "earth_nav.dat", "earth_awy.dat", "earth_aptmeta.dat")
 NAVDATA_CHANGE_CHECK_SECONDS = 3600
 _MONTHS = {m: i for i, m in enumerate(("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG",
                                        "SEP", "OCT", "NOV", "DEC"), start=1)}
@@ -222,12 +197,27 @@ LANDED_CONFIRM_POLLS = 5
 ATIS_AIRPORT_OVERRIDE_ENTITY_ID = "input_text.vatsim_atis_airport"
 # Leaves range only this far beyond it, so a holding pattern at the edge does not flap the card.
 DESTINATION_RANGE_HYSTERESIS_NM = 5.0
+# No ATIS online for the airport the card shows, so show its METAR.
+# VATSIM's own METAR service first (the weather VATSIM ATIS and controllers work from), then
+# aviationweather.gov, which also supplies a flight category. Fetched off the main thread, at
+# most once per airport per metar_refresh_minutes, and only while that airport has no ATIS.
+METAR_VATSIM_URL = "https://metar.vatsim.net/{icao}"
+METAR_AWC_URL = "https://aviationweather.gov/api/data/metar?ids={icao}&format=json"
+METAR_FETCH_TIMEOUT_SECONDS = 10
+DEFAULT_METAR_REFRESH_MINUTES = 10.0
+# Hourly reports plus one missed report, with margin. An older METAR is dropped rather than shown.
+METAR_MAX_AGE_SECONDS = 90 * 60
+# A fetch thread that never handed back (it cannot outlive two 10 s timeouts) is retried after this.
+METAR_INFLIGHT_STALE_SECONDS = 120
+METAR_HEADERS = {"User-Agent": "vatsim_ha_tracker (+https://github.com/SavBuilds/vatsim_ha_tracker)"}
+METAR_TIME_RE = re.compile(r"^(\d{2})(\d{2})(\d{2})Z$")
+METAR_LAYER_RE = re.compile(r"^(BKN|OVC|VV)(\d{3})")
+METAR_SM_RE = re.compile(r"^([PM])?(\d+)?(?:(\d+)/(\d+))?SM$")
+METAR_METERS_RE = re.compile(r"^(\d{4})(NDV)?$")
+FLIGHT_CATEGORIES = ("VFR", "MVFR", "IFR", "LIFR")
 
-# States pushed with set_state live only in HA's state machine, so an HA
-# restart drops them, and the _last_*_published dedupe caches then stop this
-# app from pushing them again until a value changes. The last aircraft
-# position is also persisted next to this file so it survives an AppDaemon
-# restart. Both feed _reconcile_published_states.
+# The last aircraft position is saved to a file so the map has a position after a restart,
+# before the pilot next connects. The host decides where the file lives (_last_aircraft_path).
 LAST_AIRCRAFT_STATE_FILENAME = "vatsim_last_aircraft.json"
 # Write cadence while flying; clears and terminate() write immediately.
 LAST_AIRCRAFT_PERSIST_MIN_SECONDS = 60
@@ -235,18 +225,13 @@ LAST_AIRCRAFT_PERSIST_MIN_SECONDS = 60
 # the republish is not sticking, so it is logged at WARNING.
 RESTORE_REPEAT_WARN_SECONDS = 600
 
-# Every poll checks each entity this app has published against HA
-# itself. AppDaemon 4.5.13 does not report a failed state write: HassPlugin.set_plugin_state
-# logs and returns None (plugins/hass/hassplugin.py:877-900), and AppDaemon then stores the
-# state in its own cache anyway and returns it (state.py:845-873). So neither set_state's
-# result nor entity_exists() (which reads that cache) shows the write failed, and the dedupe
-# caches never retry it. One /api/template render reads the publication token of every
-# published entity; one that is missing, or holds a token other than this app's last write,
-# is republished from _published_states.
-# This compared last_reported to this app's clock, which missed a
-# rejected write within the 2 s slack and looped on clock skew. The token involves no clock.
-# It changes only when the content changes, so a repeat write stays an unchanged state in HA
-# (no extra state_changed event). A string, because AppDaemon's REST path drops None, False and 0.
+# Publish verification, for hosts whose set_state can fail without saying so (a host that
+# writes states over an API from outside Home Assistant). Every poll, one template render reads
+# the publication token of every published entity; one that is missing, or holds a token other
+# than the last write, is republished from _published_states. A host whose set_state cannot
+# fail silently overrides _reconcile_published_states with a no-op, as the integration does.
+# The token involves no clock. It changes only when the content changes, so a repeat write
+# stays an unchanged state. A string, because some hosts drop None, False and 0.
 # The state is compared too, so an edit that keeps the token (Developer Tools
 # pre-fills the attributes) is repaired. Attributes are not compared: an edit to one alone stays
 # until the next change, because reading the geojson attributes every poll costs more than that risk.
@@ -276,6 +261,76 @@ DEFAULT_NAVDATA_PATH = None
 # --------------------------------------------------------------------------
 # Enums
 # --------------------------------------------------------------------------
+
+def parse_metar_obs_time(raw: str, now_utc: datetime) -> Optional[float]:
+    """Epoch seconds of a METAR's DDHHMMZ group. The group has no month, so take the latest
+    matching date that is not in the future (1 h slack for clock skew)."""
+    for token in raw.split()[:4]:
+        m = METAR_TIME_RE.match(token)
+        if not m:
+            continue
+        day, hh, mm = (int(g) for g in m.groups())
+        if not (1 <= day <= 31 and hh < 24 and mm < 60):
+            return None
+        year, month = now_utc.year, now_utc.month
+        for _ in range(3):
+            try:
+                dt = datetime(year, month, day, hh, mm, tzinfo=timezone.utc)
+            except ValueError:
+                dt = None  # day 31 in a 30-day month: try the month before
+            if dt is not None and dt.timestamp() <= now_utc.timestamp() + 3600:
+                return dt.timestamp()
+            month -= 1
+            if month < 1:
+                month, year = 12, year - 1
+        return None
+    return None
+
+
+def metar_flight_category(raw: str) -> Optional[str]:
+    """FAA flight category from a raw METAR: LIFR ceiling < 500 ft or vis < 1 SM, IFR < 1000 /
+    < 3, MVFR <= 3000 / <= 5, else VFR. Ceiling is the lowest BKN, OVC or VV layer. None when
+    the visibility cannot be read, rather than guessing from the ceiling alone."""
+    tokens = raw.split()
+    if "RMK" in tokens:
+        tokens = tokens[:tokens.index("RMK")]
+    vis_sm: Optional[float] = None
+    ceiling_ft: Optional[float] = None
+    for i, tok in enumerate(tokens):
+        if tok == "CAVOK":
+            vis_sm = 10.0
+            continue
+        if vis_sm is None:
+            m = METAR_SM_RE.match(tok)
+            if m and (m.group(2) or m.group(3)):
+                # One token holds either a whole number (10SM, P6SM) or a fraction (1/2SM, M1/4SM).
+                vis = float(m.group(2)) if m.group(2) else float(m.group(3)) / max(float(m.group(4)), 1.0)
+                # "1 1/2SM": the whole number is the previous token.
+                if m.group(3) and i > 0 and tokens[i - 1].isdigit() and len(tokens[i - 1]) == 1:
+                    vis += float(tokens[i - 1])
+                vis_sm = vis
+                continue
+            m = METAR_METERS_RE.match(tok)
+            # Only after the time group, so a 4-digit token in the header is not read as visibility.
+            if m and i >= 2:
+                meters = int(m.group(1))
+                vis_sm = 10.0 if meters >= 9999 else meters / 1609.344
+                continue
+        m = METAR_LAYER_RE.match(tok)
+        if m:
+            height = int(m.group(2)) * 100.0
+            ceiling_ft = height if ceiling_ft is None else min(ceiling_ft, height)
+    if vis_sm is None:
+        return None
+    ceiling = ceiling_ft if ceiling_ft is not None else float("inf")
+    if ceiling < 500 or vis_sm < 1:
+        return "LIFR"
+    if ceiling < 1000 or vis_sm < 3:
+        return "IFR"
+    if ceiling <= 3000 or vis_sm <= 5:
+        return "MVFR"
+    return "VFR"
+
 
 class FeedHealth(str, Enum):
     HEALTHY = "healthy"
@@ -324,6 +379,19 @@ class RouteResolutionStatus(str, Enum):
 # Dataclasses
 # --------------------------------------------------------------------------
 
+class Point(NamedTuple):
+    """A position in GeoJSON order: x is longitude, y is latitude."""
+    x: float
+    y: float
+
+
+def _boundary_or_raise(geometry: Any) -> "geo.Boundary":
+    boundary = geo.boundary_from_geojson(geometry)
+    if boundary is None:
+        raise ValueError("not a usable Polygon or MultiPolygon")
+    return boundary
+
+
 @dataclass(frozen=True)
 class SectorIdentity:
     """Debounce/identity key: (mode, controller_callsign, polygon_id)."""
@@ -348,7 +416,6 @@ class CtrFeature:
     fir_id: str
     prefix: str
     geometry: Any
-    prepared: Any
 
 
 @dataclass(frozen=True)
@@ -357,7 +424,6 @@ class TraconFeature:
     prefixes: Tuple[str, ...]
     suffix: str  # "APP" or "DEP"
     geometry: Any
-    prepared: Any
 
 
 @dataclass(frozen=True)
@@ -422,7 +488,7 @@ class NavDataSnapshot:
 class NatTrackSnapshot:
     """An immutable snapshot of the currently in-force North Atlantic
     Tracks, kept SEPARATE from NavDataSnapshot on purpose: local navdata
-    is a large disk parse (hundreds of thousands of rows) refreshed on an AIRAC cadence (30 days by
+    is a ~250k-row disk parse refreshed on an AIRAC cadence (30 days by
     default), whereas tracks reissue about twice daily. Folding them
     into one snapshot would mean either re-parsing every fix hourly or
     serving expired tracks for a month.
@@ -469,19 +535,13 @@ class DebounceTracker:
 # Main app
 # --------------------------------------------------------------------------
 
-class VatsimAtcTracker(hass.Hass):
-    """AppDaemon app implementing the four-entity VATSIM coverage model."""
+class VatsimAtcEngine:
+    """The tracker logic. A mixin: combine it with a Host, engine first (see Host above)."""
 
     # ---- Lifecycle -------------------------------------------------------
 
     def initialize(self) -> None:
-        try:
-            self._load_config()
-        except ValueError as exc:
-            # One clear line naming the key, then stop: running with a guessed
-            # value would look healthy while tracking nothing.
-            self.log(f"Configuration error, app not started: {exc}", level="ERROR")
-            raise
+        self._load_config()
         self._init_state()
         self._last_aircraft_attrs = self._load_last_aircraft()
 
@@ -524,6 +584,10 @@ class VatsimAtcTracker(hass.Hass):
                 self.nat_track_refresh_interval_seconds,
             )
 
+        # B-METAR v2: a typed-in airport used to wait for the next poll (up to ~20 s), so a value
+        # typed and cleared inside one poll was never seen. React to the helper directly.
+        self.listen_state(self._on_atis_override_change, ATIS_AIRPORT_OVERRIDE_ENTITY_ID)
+
         self.run_in(self._poll_cycle, 1)
 
     def terminate(self) -> None:
@@ -553,102 +617,64 @@ class VatsimAtcTracker(hass.Hass):
 
     _CID_PLACEHOLDER_VALUES = {"", "replace_me", "your_cid", "your_vatsim_cid", "0"}
 
-    def _cfg_number(self, key: str, default: Any, cast=float, minimum: Optional[float] = None,
-                    exclusive: bool = False):
-        """Numeric apps.yaml value, or ValueError naming the key."""
-        raw = self.args.get(key, default)
-        if isinstance(raw, bool) or raw is None:
-            raise ValueError(f"'{key}' must be a number, got {raw!r}")
-        try:
-            value = cast(raw)
-        except (TypeError, ValueError):
-            raise ValueError(f"'{key}' must be a number, got {raw!r}") from None
-        if minimum is not None and (value <= minimum if exclusive else value < minimum):
-            bound = "greater than" if exclusive else "at least"
-            raise ValueError(f"'{key}' must be {bound} {minimum}, got {raw!r}")
-        return value
-
-    def _cfg_optional_str(self, key: str, default: Optional[str]) -> Optional[str]:
-        """Optional string apps.yaml value. Missing, null or blank means not set."""
-        raw = self.args.get(key, default)
-        if raw is None:
-            return None
-        if not isinstance(raw, str):
-            raise ValueError(f"'{key}' must be a string or left unset, got {raw!r}")
-        return raw.strip() or None
-
     def _load_config(self) -> None:
         raw_cid = self.args.get("vatsim_cid")
         if raw_cid is None or str(raw_cid).strip().lower() in self._CID_PLACEHOLDER_VALUES:
             raise ValueError(
                 "vatsim_cid is not configured (missing or still the example placeholder "
-                "value). Set 'vatsim_cid' in apps.yaml to your actual VATSIM Certificate "
-                "ID before running this app - see apps.yaml.example for the expected format."
+                "value). Set it to your VATSIM Certificate ID, which is a number."
             )
         self.vatsim_cid = str(raw_cid).strip()
-        if not self.vatsim_cid.isdigit():
-            raise ValueError(f"'vatsim_cid' must be your numeric VATSIM CID, got {raw_cid!r}")
-        num = self._cfg_number
-        self.poll_interval = num("poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS, minimum=1)
-        if self.poll_interval < MIN_USEFUL_POLL_INTERVAL_SECONDS:
-            self.log(f"poll_interval_seconds={self.poll_interval:g} is below the feed's "
-                     f"{MIN_USEFUL_POLL_INTERVAL_SECONDS} s regeneration interval; faster polling "
-                     f"returns the same data and loads the VATSIM servers for nothing",
-                     level="WARNING")
-        self.lookahead_minutes = num("lookahead_minutes", DEFAULT_LOOKAHEAD_MINUTES, minimum=0, exclusive=True)
-        self.min_groundspeed_kt = num("minimum_groundspeed_knots", DEFAULT_MIN_GROUNDSPEED_KT, minimum=0)
-        self.altitude_hysteresis_ft = num("altitude_hysteresis_feet", DEFAULT_ALTITUDE_HYSTERESIS_FT, minimum=0)
-        self.presence_absent_after_misses = num(
-            "presence_absent_after_misses", DEFAULT_PRESENCE_ABSENT_AFTER_MISSES, cast=int, minimum=1
+        self.poll_interval = float(self.args.get("poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS))
+        self.lookahead_minutes = float(self.args.get("lookahead_minutes", DEFAULT_LOOKAHEAD_MINUTES))
+        self.min_groundspeed_kt = float(self.args.get("minimum_groundspeed_knots", DEFAULT_MIN_GROUNDSPEED_KT))
+        self.altitude_hysteresis_ft = float(self.args.get("altitude_hysteresis_feet", DEFAULT_ALTITUDE_HYSTERESIS_FT))
+        self.presence_absent_after_misses = int(
+            self.args.get("presence_absent_after_misses", DEFAULT_PRESENCE_ABSENT_AFTER_MISSES)
         )
-        self.stale_feed_multiplier = num("stale_feed_multiplier", DEFAULT_STALE_FEED_MULTIPLIER, minimum=0)
-        self.stale_feed_grace_seconds = num("stale_feed_grace_seconds", DEFAULT_STALE_FEED_GRACE_SECONDS, minimum=0)
-        self.app_dep_altitude_gate_ft = num("app_dep_altitude_gate_ft", DEFAULT_APP_DEP_ALTITUDE_GATE_FT)
-        self.heading_stability_window = num(
-            "heading_stability_window_polls", HEADING_STABILITY_WINDOW, cast=int, minimum=2
+        self.stale_feed_multiplier = float(self.args.get("stale_feed_multiplier", DEFAULT_STALE_FEED_MULTIPLIER))
+        self.stale_feed_grace_seconds = float(
+            self.args.get("stale_feed_grace_seconds", DEFAULT_STALE_FEED_GRACE_SECONDS)
         )
-        self.heading_stability_max_delta_deg = num(
-            "heading_stability_max_delta_deg", HEADING_STABILITY_MAX_DELTA_DEG, minimum=0, exclusive=True
+        self.app_dep_altitude_gate_ft = float(
+            self.args.get("app_dep_altitude_gate_ft", DEFAULT_APP_DEP_ALTITUDE_GATE_FT)
         )
-        self.vatspy_boundaries_url = self._cfg_optional_str("vatspy_boundaries_url", DEFAULT_VATSPY_BOUNDARIES_URL)
-        self.vatspy_dat_url = self._cfg_optional_str("vatspy_dat_url", DEFAULT_VATSPY_DAT_URL)
-        if not self.vatspy_boundaries_url or not self.vatspy_dat_url:
-            raise ValueError("'vatspy_boundaries_url' and 'vatspy_dat_url' must not be blank; "
-                             "remove the keys to use the defaults")
-        self.simaware_boundaries_path = self._cfg_optional_str(
-            "simaware_boundaries_path", DEFAULT_SIMAWARE_BOUNDARIES_PATH)
-        self.geometry_refresh_interval_seconds = num(
-            "geometry_refresh_interval_days", DEFAULT_GEOMETRY_REFRESH_INTERVAL_DAYS, minimum=0, exclusive=True
-        ) * 24 * 3600
-        self.navdata_path = self._cfg_optional_str("navdata_path", DEFAULT_NAVDATA_PATH)
-        self.navdata_refresh_interval_seconds = num(
-            "navdata_refresh_interval_days", DEFAULT_NAVDATA_REFRESH_INTERVAL_DAYS, minimum=0, exclusive=True
-        ) * 24 * 3600
-        # Set nat_tracks_url to null/empty in apps.yaml to disable track
+        self.vatspy_boundaries_url = self.args.get("vatspy_boundaries_url", DEFAULT_VATSPY_BOUNDARIES_URL)
+        self.vatspy_dat_url = self.args.get("vatspy_dat_url", DEFAULT_VATSPY_DAT_URL)
+        self.simaware_boundaries_path = self.args.get("simaware_boundaries_path", DEFAULT_SIMAWARE_BOUNDARIES_PATH)
+        geometry_refresh_interval_days = float(
+            self.args.get("geometry_refresh_interval_days", DEFAULT_GEOMETRY_REFRESH_INTERVAL_DAYS)
+        )
+        self.geometry_refresh_interval_seconds = geometry_refresh_interval_days * 24 * 3600
+        self.navdata_path = self.args.get("navdata_path", DEFAULT_NAVDATA_PATH)
+        navdata_refresh_interval_days = float(
+            self.args.get("navdata_refresh_interval_days", DEFAULT_NAVDATA_REFRESH_INTERVAL_DAYS)
+        )
+        self.navdata_refresh_interval_seconds = navdata_refresh_interval_days * 24 * 3600
+        # Set nat_tracks_url to null or empty to disable track
         # expansion entirely; route lines then skip NATx tokens as before.
-        self.nat_tracks_url = self._cfg_optional_str("nat_tracks_url", NAT_TRACKS_URL)
-        self.nat_track_refresh_interval_seconds = num(
-            "nat_track_refresh_interval_minutes", DEFAULT_NAT_TRACK_REFRESH_INTERVAL_MINUTES,
-            minimum=0, exclusive=True
+        self.nat_tracks_url = self.args.get("nat_tracks_url", NAT_TRACKS_URL)
+        self.nat_track_refresh_interval_seconds = float(
+            self.args.get("nat_track_refresh_interval_minutes",
+                          DEFAULT_NAT_TRACK_REFRESH_INTERVAL_MINUTES)
         ) * 60
-        # Set vatsim_status_url to null/empty to skip the lookup and always
-        # use the built-in feed URL.
-        self.vatsim_status_url = self._cfg_optional_str("vatsim_status_url", DEFAULT_VATSIM_STATUS_URL)
-        self.track_history_max_points = num(
-            "track_history_max_points", DEFAULT_TRACK_HISTORY_MAX_POINTS, cast=int, minimum=1
+        self.track_history_max_points = int(
+            self.args.get("track_history_max_points", DEFAULT_TRACK_HISTORY_MAX_POINTS)
         )
-        self.track_history_min_distance_nm = num(
-            "track_history_min_distance_nm", DEFAULT_TRACK_HISTORY_MIN_DISTANCE_NM, minimum=0
+        self.track_history_min_distance_nm = float(
+            self.args.get("track_history_min_distance_nm", DEFAULT_TRACK_HISTORY_MIN_DISTANCE_NM)
         )
-        self.track_history_min_seconds = num(
-            "track_history_min_seconds", DEFAULT_TRACK_HISTORY_MIN_SECONDS, minimum=0
+        self.track_history_min_seconds = float(
+            self.args.get("track_history_min_seconds", DEFAULT_TRACK_HISTORY_MIN_SECONDS)
         )
-        self.destination_range_nm = num("destination_range_nm", DEFAULT_DESTINATION_RANGE_NM, minimum=0)
-        self.departure_near_nm = num("departure_near_nm", DEPARTURE_NEAR_NM, minimum=0)
-        self.takeoff_groundspeed_kt = num("takeoff_groundspeed_knots", TAKEOFF_GROUNDSPEED_KT, minimum=0)
-        # Where the last aircraft position is saved (it holds your CID,
-        # callsign and position). Unset: next to this file.
-        self.last_aircraft_path = self._cfg_optional_str("last_aircraft_path", None)
+        self.destination_range_nm = float(
+            self.args.get("destination_range_nm", DEFAULT_DESTINATION_RANGE_NM)
+        )
+        # metar_fallback: false turns the METAR fetches off entirely.
+        self.metar_fallback = str(self.args.get("metar_fallback", True)).strip().lower() not in (
+            "false", "0", "no", "off", "none", "")
+        self.metar_refresh_seconds = max(
+            60.0, float(self.args.get("metar_refresh_minutes", DEFAULT_METAR_REFRESH_MINUTES)) * 60)
 
     def _init_state(self) -> None:
         self._geometry: Optional[GeometrySnapshot] = None
@@ -677,9 +703,19 @@ class VatsimAtcTracker(hass.Hass):
         self._stopped_polls = 0
         self._ground_altitude_ft: Optional[float] = None
         self._last_atis_list: List[Any] = []
+        # Touched only on the host loop; fetch threads hand results back via run_in.
+        self._metar_cache: Dict[str, Dict[str, Any]] = {}
+        # B-METAR v2: (point, departure, arrival) from the last connected poll, for republishing.
+        self._destination_ctx: Optional[Tuple[Any, str, str]] = None
+        self._metar_inflight: Dict[str, float] = {}
+        self._metar_last_attempt: Dict[str, float] = {}
+        self._metar_wanted_ts: Optional[float] = None
+        self._metar_status: Optional[str] = None
+        self._metar_source_last: Optional[str] = None
+        self._last_metar_error: Optional[str] = None
+        self._last_metar_error_ts: Optional[float] = None
 
         self._poll_in_flight = False
-        self._feed_url = VATSIM_FEED_URL
         self._consecutive_feed_failures = 0
         self._backoff_seconds = self.poll_interval
         self._last_feed_success_ts: Optional[float] = None
@@ -710,8 +746,8 @@ class VatsimAtcTracker(hass.Hass):
         self._last_session_track_published: Optional[Tuple] = None
         self._last_online_boundaries_published: Optional[Tuple[int, int]] = None
 
-        # entity_id -> (state, attributes as HA holds them). Merged on every
-        # set_state to mirror AppDaemon's default attribute merge.
+        # entity_id -> (state, attributes as published). Merged on every set_state: a publish
+        # adds to the attributes already there, so a host shows the merged set.
         self._published_states: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
         self._processing_error_active = False
         self._last_poll_error_sig: Optional[str] = None
@@ -736,37 +772,13 @@ class VatsimAtcTracker(hass.Hass):
             target=self._load_geometry_worker, daemon=True, name="vatsim-geom-refresh"
         ).start()
 
-    def _resolve_feed_url(self) -> None:
-        """Read the current data feed URL from VATSIM's status document.
-        Runs on the geometry loader thread (startup, then every
-        geometry_refresh_interval_days). Fail-soft: on any error the URL in
-        use is kept. A feed that then cannot be fetched is reported by the
-        normal feed-health path and the feed_stale watchdog."""
-        if not self.vatsim_status_url:
-            return
-        try:
-            resp = requests.get(self.vatsim_status_url, timeout=10, headers=HTTP_HEADERS)
-            resp.raise_for_status()
-            urls = ((resp.json().get("data") or {}).get("v3")) or []
-            url = next((u for u in urls if isinstance(u, str) and FEED_URL_ALLOWED_RE.match(u)), None)
-            if url is None:
-                raise ValueError("no usable v3 feed URL in the status document")
-        except Exception as exc:
-            self.log(f"Could not read the feed URL from {self.vatsim_status_url} ({exc}); "
-                     f"continuing with {self._feed_url}", level="WARNING")
-            return
-        if url != self._feed_url:
-            self.log(f"VATSIM feed URL taken from the status document: {url}", level="INFO")
-            self._feed_url = url
-
     def _load_geometry_worker(self) -> None:
-        self._resolve_feed_url()
         try:
             self._simaware_load_issue_count = 0
             ctr_raw = self._fetch_and_parse_vatspy()
             tracon_features = self._fetch_and_parse_simaware()
         except Exception as exc:
-            self._last_geometry_refresh_error = f"{type(exc).__name__}: {exc}"
+            self._last_geometry_refresh_error = f"{getattr(exc, 'kind', type(exc).__name__)}: {exc}"
             self._last_geometry_refresh_error_ts = time.time()
             self.log(f"Geometry load failed ({exc}); continuing to use the previous "
                      f"geometry snapshot (version={self._geometry.version if self._geometry else None}) "
@@ -808,13 +820,9 @@ class VatsimAtcTracker(hass.Hass):
         )
 
     def _fetch_and_parse_vatspy(self) -> VatspyRawData:
-        boundaries_resp = requests.get(self.vatspy_boundaries_url, timeout=15, headers=HTTP_HEADERS)
-        boundaries_resp.raise_for_status()
-        boundaries_geojson = boundaries_resp.json()
+        boundaries_geojson = json.loads(self.http_get(self.vatspy_boundaries_url, timeout=15))
 
-        dat_resp = requests.get(self.vatspy_dat_url, timeout=15, headers=HTTP_HEADERS)
-        dat_resp.raise_for_status()
-        prefix_to_boundary_id = self._parse_vatspy_dat_firs(dat_resp.text)
+        prefix_to_boundary_id = self._parse_vatspy_dat_firs(self.http_get(self.vatspy_dat_url, timeout=15))
 
         boundary_features_by_id: Dict[str, Any] = {}
         for feature in boundaries_geojson.get("features", []):
@@ -940,10 +948,10 @@ class VatsimAtcTracker(hass.Hass):
                      level="WARNING")
             return None
         try:
-            geom = shape(feature["geometry"])
+            geom = _boundary_or_raise(feature["geometry"])
             return TraconFeature(
                 polygon_id=polygon_id, prefixes=tuple(prefixes), suffix=suffix,
-                geometry=geom, prepared=prep(geom),
+                geometry=geom,
             )
         except Exception as exc:
             self._simaware_load_issue_count += 1
@@ -1001,7 +1009,7 @@ class VatsimAtcTracker(hass.Hass):
     def _read_navdata_cycle(path: str) -> Tuple[Optional[str], Optional[str]]:
         """(cycle, valid_until as YYYY-MM-DD) from Navigraph's cycle.json
         (validityPeriod "YYYY-MM-DD/YYYY-MM-DD"), else cycle_info.txt
-        ("AIRAC cycle : YYNN", "Valid (from/to): DD/MON/YYYY - DD/MON/YYYY").
+        ("AIRAC cycle : 2611", "Valid (from/to): 29/OCT/2026 - 25/NOV/2026").
         (None, None) when neither is present or parseable; fail-soft."""
         try:
             with open(os.path.join(path, "cycle.json"), "r", encoding="utf-8") as f:
@@ -1031,7 +1039,7 @@ class VatsimAtcTracker(hass.Hass):
         """Runs entirely on a background thread, mirroring
         _load_geometry_worker's pattern exactly. Never touches
         self._navdata directly except via the single assignment performed
-        in _apply_navdata_snapshot, which runs back on AppDaemon's loop."""
+        in _apply_navdata_snapshot, which runs back on the host loop."""
         try:
             self._load_navdata_worker_body()
         finally:
@@ -1040,24 +1048,6 @@ class VatsimAtcTracker(hass.Hass):
     def _load_navdata_worker_body(self) -> None:
         # Read before parsing: a file written mid-parse leaves the newer mtime
         # unrecorded, so the next change check reloads it.
-        resolved = os.path.abspath(self.navdata_path)
-        if not any(os.path.isfile(os.path.join(resolved, name)) for name in NAVDATA_REQUIRED_FILES):
-            # A wrong path used to load as an empty but "successful" snapshot
-            # with only per-file warnings. Nothing is swapped in now, so
-            # navdata_status stays configured_but_unloaded (or the previous
-            # snapshot stays in use), the error is published on
-            # sensor.vatsim_feed_health, and _check_navdata_changed retries hourly.
-            reason = ("is not a directory" if not os.path.isdir(resolved)
-                      else "contains none of the expected files")
-            message = (f"navdata_path '{self.navdata_path}' (resolved to '{resolved}') {reason}. "
-                       f"Expected: {', '.join(NAVDATA_REQUIRED_FILES)}. Route plotting stays "
-                       f"disabled until this is fixed. Inside the AppDaemon add-on the Home "
-                       f"Assistant config directory is /homeassistant, and /config is the "
-                       f"add-on's own folder.")
-            self._last_navdata_refresh_error = message
-            self._last_navdata_refresh_error_ts = time.time()
-            self.log(message, level="ERROR")
-            return
         source_mtime = self._navdata_source_mtime()
         cycle, valid_until = self._read_navdata_cycle(self.navdata_path)
         try:
@@ -1168,17 +1158,13 @@ class VatsimAtcTracker(hass.Hass):
         """Fetches the currently in-force NAT tracks and builds a
         NatTrackSnapshot. Mirrors _load_navdata_worker's threading
         pattern: never touches self._nat directly, hands the snapshot
-        back via run_in for a single atomic swap on AppDaemon's loop.
+        back via run_in for a single atomic swap on the host loop.
 
         Fails soft as a whole: on any error the previous snapshot is
         retained and the error is surfaced on sensor.vatsim_feed_health
         rather than silently degrading route lines."""
         try:
-            response = requests.get(
-                self.nat_tracks_url, timeout=NAT_TRACK_FETCH_TIMEOUT_SECONDS, headers=HTTP_HEADERS
-            )
-            response.raise_for_status()
-            payload = response.json()
+            payload = json.loads(self.http_get(self.nat_tracks_url, timeout=NAT_TRACK_FETCH_TIMEOUT_SECONDS))
             if not isinstance(payload, list):
                 raise ValueError(f"expected a JSON array, got {type(payload).__name__}")
 
@@ -1239,7 +1225,7 @@ class VatsimAtcTracker(hass.Hass):
                     earliest_valid_to = valid_to_ts
 
         except Exception as exc:
-            self._last_nat_refresh_error = f"{type(exc).__name__}: {exc}"
+            self._last_nat_refresh_error = f"{getattr(exc, 'kind', type(exc).__name__)}: {exc}"
             self._last_nat_refresh_error_ts = time.time()
             self.log(f"NAT track refresh failed ({exc}); retaining previous snapshot "
                      f"(version={self._nat.version if self._nat else None})",
@@ -1273,6 +1259,15 @@ class VatsimAtcTracker(hass.Hass):
         # Tracks usually land after navdata on start (network fetch vs local
         # parse); when they do not, _apply_navdata_snapshot triggers a rebuild.
         self._last_route_key = None
+
+    def _compute_metar_status(self, now: float) -> str:
+        """disabled, idle (no METAR wanted recently), pending (wanted, no result yet), ok,
+        not_found (neither source has the station), error (both sources failed)."""
+        if not self.metar_fallback:
+            return "disabled"
+        if self._metar_wanted_ts is None or now - self._metar_wanted_ts > 2 * self.metar_refresh_seconds:
+            return "idle"
+        return self._metar_status or "pending"
 
     def _compute_nat_track_status(self) -> str:
         """Mirrors _compute_navdata_status. 'expired' is called out
@@ -1575,13 +1570,9 @@ class VatsimAtcTracker(hass.Hass):
 
     def _fetch_feed(self) -> Tuple[Optional[dict], Optional[str], Optional[float]]:
         try:
-            resp = requests.get(self._feed_url, timeout=10, headers=HTTP_HEADERS)
-            resp.raise_for_status()
-            payload = resp.json()
-        except requests.exceptions.ReadTimeout as exc:
-            return None, f"read timeout: {exc}", None
-        except requests.exceptions.RequestException as exc:
-            return None, f"request error: {exc}", None
+            payload = json.loads(self.http_get(VATSIM_FEED_URL, timeout=10))
+        except FetchError as exc:
+            return None, (f"read timeout: {exc}" if exc.is_timeout else f"request error: {exc}"), None
         except ValueError as exc:
             return None, f"invalid JSON: {exc}", None
         return payload, None, self._extract_feed_timestamp(payload)
@@ -1656,8 +1647,6 @@ class VatsimAtcTracker(hass.Hass):
             "navdata_valid_until": self._navdata.valid_until if self._navdata else None,
             "navdata_snapshot_version": self._navdata.version if self._navdata else None,
             "navdata_load_issue_count": self._navdata.load_issue_count if self._navdata else 0,
-            "last_navdata_refresh_error": self._last_navdata_refresh_error,
-            "last_navdata_refresh_error_ts": self._last_navdata_refresh_error_ts,
             # NAT tracks. Surfaced separately from navdata because they go
             # stale on a scale of hours, not AIRAC cycles - an expired
             # snapshot draws a plausible but wrong oceanic line, so this
@@ -1672,6 +1661,12 @@ class VatsimAtcTracker(hass.Hass):
             "nat_track_valid_until": self._nat.valid_until if self._nat else None,
             "last_nat_refresh_error": self._last_nat_refresh_error,
             "last_nat_refresh_error_ts": self._last_nat_refresh_error_ts,
+            # Idle unless a METAR was wanted within two refresh intervals, so one old
+            # failure cannot hold 'error' after the flight. Watched by vatsim_feed_unhealthy_v2.
+            "metar_status": self._compute_metar_status(now),
+            "metar_source_last": self._metar_source_last,
+            "last_metar_error": self._last_metar_error,
+            "last_metar_error_ts": self._last_metar_error_ts,
             # Entities HA has not accepted after repeated republishes. A zero count
             # and an empty string are dropped in publication; readers use | int(0).
             "publish_unverified_count": len(self._publish_failing()),
@@ -1741,11 +1736,8 @@ class VatsimAtcTracker(hass.Hass):
         return attrs
 
     def _last_aircraft_path(self) -> str:
-        # Next to this file, i.e. the AppDaemon apps dir, unless last_aircraft_path is
-        # set. Deliberately not a /config default: inside the add-on container /config
-        # is the add-on's own folder, not the Home Assistant config directory.
-        if self.last_aircraft_path:
-            return self.last_aircraft_path
+        # Default: next to this file. A host should override this with a path that survives
+        # an update of the code, as the integration does.
         return os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             LAST_AIRCRAFT_STATE_FILENAME)
 
@@ -1810,7 +1802,7 @@ class VatsimAtcTracker(hass.Hass):
         """
         expected = dict(self._published_states)
         if AIRCRAFT_TRACKER_ENTITY_ID not in expected and self._last_aircraft_attrs is not None:
-            # AppDaemon restarted, so only the saved file knows the position.
+            # Nothing published yet this run, so only the saved file knows the position.
             expected[AIRCRAFT_TRACKER_ENTITY_ID] = ("not_home", self._last_known_aircraft_attrs())
         if not expected:
             return  # nothing published yet, nothing to restore against
@@ -1839,7 +1831,7 @@ class VatsimAtcTracker(hass.Hass):
 
         lost = []
         for entity_id in sorted(expected):
-            # No token: AppDaemon restarted and only the saved position is known; existing is enough.
+            # No token: nothing written yet this run and only the saved position is known; existing is enough.
             want = self._published_tokens.get(entity_id)
             if entity_id not in reported:
                 lost.append((entity_id, "missing"))
@@ -1890,7 +1882,7 @@ class VatsimAtcTracker(hass.Hass):
                     message=("HA has not accepted these after "
                              f"{PUBLISH_FAILING_AFTER_ATTEMPTS} republishes: {', '.join(failing)}. "
                              "Dashboards using them show stale or missing data. Check the "
-                             "AppDaemon log for 'Error setting state'."),
+                             "log of whatever runs the tracker for a failed state write."),
                 )
             except Exception as exc:
                 self.log(f"Could not raise the publish notification: {exc}", level="WARNING")
@@ -1912,9 +1904,9 @@ class VatsimAtcTracker(hass.Hass):
         should_append = last is None
         if last is not None:
             seconds_since_last = now - float(last["ts"])
-            distance_since_last_nm = geopy_distance(
-                (float(last["lat"]), float(last["lon"])), (point.y, point.x),
-            ).nautical
+            distance_since_last_nm = geo.distance_nm(
+                float(last["lat"]), float(last["lon"]), point.y, point.x,
+            )
             should_append = (
                 seconds_since_last >= self.track_history_min_seconds
                 or distance_since_last_nm >= self.track_history_min_distance_nm
@@ -1974,7 +1966,7 @@ class VatsimAtcTracker(hass.Hass):
         self.set_state(SESSION_TRACK_ENTITY_ID, state=state, attributes=attrs)
 
     def _trim_history(self) -> None:
-        keep = max(self.heading_stability_window, ALTITUDE_TREND_WINDOW) + 1
+        keep = max(HEADING_STABILITY_WINDOW, ALTITUDE_TREND_WINDOW) + 1
         self._altitude_history = self._altitude_history[-keep:]
         self._heading_history = self._heading_history[-keep:]
 
@@ -2074,8 +2066,8 @@ class VatsimAtcTracker(hass.Hass):
         self._publish_route_state(
             RouteResolutionStatus.NO_FLIGHT_PLAN, None, None, None, 0, 0, False, False, force=True
         )
-        # Position carried explicitly. It used to survive only through
-        # AppDaemon's attribute merge, which an HA restart defeats.
+        # Position carried explicitly, so it does not depend on an attribute merge surviving
+        # a restart.
         self.set_state(
             AIRCRAFT_TRACKER_ENTITY_ID,
             state="not_home",
@@ -2141,9 +2133,9 @@ class VatsimAtcTracker(hass.Hass):
                     continue
 
                 try:
-                    geom = shape(raw_feature["geometry"])
+                    geom = _boundary_or_raise(raw_feature["geometry"])
                     resolved: Optional[CtrFeature] = CtrFeature(
-                        fir_id=boundary_id, prefix=candidate, geometry=geom, prepared=prep(geom)
+                        fir_id=boundary_id, prefix=candidate, geometry=geom
                     )
                 except Exception as exc:
                     self._runtime_unresolved_controller_count += 1
@@ -2169,8 +2161,8 @@ class VatsimAtcTracker(hass.Hass):
             matches = [f for f in tracon_features if f.suffix == suffix and candidate in f.prefixes]
             # SimAware marks a boundary DEP only when it applies
             # specifically to DEP; otherwise the plain (APP) boundary covers the
-            # prefix's DEP callsigns too. Very few SimAware features are
-            # DEP-specific, so without this a typical XXX_DEP matched nothing. A DEP-specific
+            # prefix's DEP callsigns too. Only 8 of 1,355 SimAware features are
+            # DEP-specific, so without this BOS_DEP matched nothing. A DEP-specific
             # boundary still wins when one exists for the same prefix.
             if not matches and suffix == "DEP":
                 matches = [f for f in tracon_features if f.suffix == "APP" and candidate in f.prefixes]
@@ -2189,7 +2181,7 @@ class VatsimAtcTracker(hass.Hass):
                 continue
             for matched_len, feature in self._resolve_ctr_features_for_controller(controller, geometry):
                 try:
-                    if feature.prepared.covers(point):
+                    if feature.geometry.covers(point.x, point.y):
                         candidates.append((matched_len, controller, feature))
                 except Exception:
                     continue
@@ -2227,11 +2219,11 @@ class VatsimAtcTracker(hass.Hass):
         return sum(deltas) / len(deltas)
 
     def _heading_stability_status(self) -> Tuple[bool, bool]:
-        if len(self._heading_history) < self.heading_stability_window:
+        if len(self._heading_history) < HEADING_STABILITY_WINDOW:
             return False, True
-        recent = [h for _, h in self._heading_history[-self.heading_stability_window:]]
+        recent = [h for _, h in self._heading_history[-HEADING_STABILITY_WINDOW:]]
         for a, b in zip(recent[:-1], recent[1:]):
-            if abs(self._heading_delta(a, b)) > self.heading_stability_max_delta_deg:
+            if abs(self._heading_delta(a, b)) > HEADING_STABILITY_MAX_DELTA_DEG:
                 return False, False
         return True, False
 
@@ -2244,8 +2236,7 @@ class VatsimAtcTracker(hass.Hass):
         if geom is None:
             return None
         try:
-            simplified = geom.simplify(BOUNDARY_GEOJSON_SIMPLIFY_TOLERANCE_DEG, preserve_topology=True)
-            return mapping(simplified)
+            return geo.boundary_to_geojson(geom, BOUNDARY_GEOJSON_SIMPLIFY_TOLERANCE_DEG)
         except Exception:
             return None
 
@@ -2329,7 +2320,7 @@ class VatsimAtcTracker(hass.Hass):
 
     def _publish_empty_online_boundaries(self) -> None:
         """Offline, no controllers to show. Same shape and dedupe as _publish_all_online_boundaries
-        with zero features; the publish reconciliation then restores it after an HA restart."""
+        with zero features; the reconciliation then restores it after an HA restart."""
         geojson_str = json.dumps({"type": "FeatureCollection", "features": []})
         snapshot = (0, hash(geojson_str))
         if snapshot == self._last_online_boundaries_published:
@@ -2356,7 +2347,7 @@ class VatsimAtcTracker(hass.Hass):
                 continue
             for matched_len, feature in self._match_tracons_for_controller(controller, geometry.tracon_features):
                 try:
-                    if feature.prepared.covers(point):
+                    if feature.geometry.covers(point.x, point.y):
                         candidates.append((matched_len, controller, feature))
                 except Exception:
                     continue
@@ -2443,54 +2434,8 @@ class VatsimAtcTracker(hass.Hass):
 
     def _project_point(self, point: Point, groundspeed_kt: float, heading_deg: float) -> Point:
         distance_nm = groundspeed_kt * (self.lookahead_minutes / 60.0)
-        origin = (point.y, point.x)
-        destination = geopy_distance(nautical=distance_nm).destination(point=origin, bearing=heading_deg)
-        return Point(destination.longitude, destination.latitude)
-
-    def _collect_line_entry_candidates(self, geometry_obj: Any, path: LineString) -> List[Point]:
-        intersection = path.intersection(geometry_obj)
-        if intersection.is_empty:
-            return []
-
-        candidates: List[Point] = []
-
-        def add_point(pt: Point) -> None:
-            candidates.append(Point(pt.x, pt.y))
-
-        def add_coord(coord: Tuple[float, float]) -> None:
-            candidates.append(Point(coord[0], coord[1]))
-
-        if isinstance(intersection, Point):
-            add_point(intersection)
-        elif isinstance(intersection, MultiPoint):
-            for geom in intersection.geoms:
-                add_point(geom)
-        elif isinstance(intersection, LineString):
-            coords = list(intersection.coords)
-            if coords:
-                add_coord(coords[0])
-        elif isinstance(intersection, MultiLineString):
-            for geom in intersection.geoms:
-                coords = list(geom.coords)
-                if coords:
-                    add_coord(coords[0])
-        elif isinstance(intersection, GeometryCollection):
-            for geom in intersection.geoms:
-                if isinstance(geom, Point):
-                    add_point(geom)
-                elif isinstance(geom, MultiPoint):
-                    for sub in geom.geoms:
-                        add_point(sub)
-                elif isinstance(geom, LineString):
-                    coords = list(geom.coords)
-                    if coords:
-                        add_coord(coords[0])
-                elif isinstance(geom, MultiLineString):
-                    for sub in geom.geoms:
-                        coords = list(sub.coords)
-                        if coords:
-                            add_coord(coords[0])
-        return candidates
+        lat, lon = geo.destination(point.y, point.x, heading_deg, distance_nm)
+        return Point(lon, lat)
 
     def _estimate_next_sector_eta(
         self, current_point: Point, projected_point: Point, groundspeed_kt: float,
@@ -2501,21 +2446,17 @@ class VatsimAtcTracker(hass.Hass):
 
         geometry_obj = next_coverage.geometry
         try:
-            if geometry_obj.covers(current_point):
+            if geometry_obj.covers(current_point.x, current_point.y):
                 return 0.0, 0.0, "now"
+            # The first point where the projected track meets the sector outline, nearest to us.
+            entry = geo.first_crossing(geometry_obj, (current_point.x, current_point.y),
+                                       (projected_point.x, projected_point.y))
         except Exception:
             return None, None, None
-
-        path = LineString([current_point, projected_point])
-        candidates = self._collect_line_entry_candidates(geometry_obj, path)
-        if not candidates:
+        if entry is None:
             return None, None, None
 
-        entry_point = min(candidates, key=path.project)
-        distance_m = geopy_distance(
-            (current_point.y, current_point.x), (entry_point.y, entry_point.x)
-        ).meters
-        distance_nm = distance_m / 1852.0
+        distance_nm = geo.distance_nm(current_point.y, current_point.x, entry[1], entry[0])
         eta_minutes = (distance_nm / groundspeed_kt) * 60.0
         if eta_minutes < 0:
             return None, None, None
@@ -2759,7 +2700,7 @@ class VatsimAtcTracker(hass.Hass):
         # Overlay the in-force NAT tracks so a filed NATx token resolves
         # through the SAME path as a named airway (fix, airway, fix) with
         # no special-casing below. ChainMap rather than a merged copy:
-        # navdata.fix_coords holds hundreds of thousands of entries and copying it on every
+        # navdata.fix_coords holds ~218k entries and copying it on every
         # route change would be pure waste. Local navdata is searched
         # first, so it wins on any key collision.
         nat = self._nat
@@ -2875,9 +2816,8 @@ class VatsimAtcTracker(hass.Hass):
             return
 
         try:
-            line = LineString([(lon, lat) for lat, lon in points]) if len(points) > 1 else None
             geojson_str = (
-                json.dumps(mapping(line)) if line is not None
+                json.dumps(geo.linestring_geojson(points)) if len(points) > 1
                 else json.dumps({"type": "MultiPoint", "coordinates": [[lon, lat] for lat, lon in points]})
             )
         except Exception:
@@ -2893,7 +2833,7 @@ class VatsimAtcTracker(hass.Hass):
             geojson_str=geojson_str,
         )
 
-    # ---- Airport ATIS: departure, arrival, or typed in -----------------------------
+    # ---- Airport ATIS: departure, arrival, or typed in --------------
 
     @staticmethod
     def _select_destination_atis(payload: dict, icao: str, role: str = "arrival") -> Optional[dict]:
@@ -2928,7 +2868,7 @@ class VatsimAtcTracker(hass.Hass):
     def _atis_attrs(self, payload: dict, icao: str, role: str) -> Dict[str, Any]:
         atis = self._select_destination_atis(payload, icao, role)
         text = (atis or {}).get("text_atis") or []
-        return {
+        attrs = {
             "airport": icao, "role": role, "range_nm": self.destination_range_nm,
             "atis_online": atis is not None,
             "atis_callsign": (atis or {}).get("callsign"),
@@ -2937,6 +2877,115 @@ class VatsimAtcTracker(hass.Hass):
             "atis_text": " ".join(str(x) for x in text) if isinstance(text, list) else str(text),
             "atis_last_updated": (atis or {}).get("last_updated"),
         }
+        if atis is not None:
+            attrs["weather_source"] = "atis"
+        else:
+            attrs.update(self._metar_attrs(icao))
+        return attrs
+
+    # ---- METAR fallback ---------------------------------------------
+
+    def _metar_attrs(self, icao: str) -> Dict[str, Any]:
+        """Cached METAR for icao, and a background fetch when the cache is due. Never blocks
+        the poll: the first call for an airport returns weather_source none and the result
+        appears on a later poll. Strings, not None, where a reader tests the value, because
+        some hosts drop None and False."""
+        out: Dict[str, Any] = {"weather_source": "none", "metar_text": None, "metar_source": None,
+                               "metar_observed_at": None, "flight_category": None}
+        icao = (icao or "").strip().upper()
+        if not self.metar_fallback or not re.fullmatch(r"[A-Z0-9]{3,4}", icao):
+            return out
+        now = time.time()
+        self._metar_wanted_ts = now
+        started = self._metar_inflight.get(icao)
+        stuck = started is not None and now - started > METAR_INFLIGHT_STALE_SECONDS
+        if (started is None or stuck) and now - self._metar_last_attempt.get(icao, 0.0) >= self.metar_refresh_seconds:
+            self._metar_last_attempt[icao] = now
+            self._metar_inflight[icao] = now
+            threading.Thread(target=self._fetch_metar_worker, args=(icao,), daemon=True,
+                             name=f"vatsim-metar-{icao}").start()
+        entry = self._metar_cache.get(icao)
+        if entry:
+            basis = entry.get("observed_ts") or entry.get("fetched_at") or 0.0
+            if now - basis <= METAR_MAX_AGE_SECONDS:
+                out.update({
+                    "weather_source": entry["source"],
+                    "metar_text": entry["raw"],
+                    "metar_source": entry["source"],
+                    "metar_observed_at": (datetime.fromtimestamp(entry["observed_ts"], timezone.utc).isoformat()
+                                          if entry.get("observed_ts") else None),
+                    "flight_category": entry.get("flight_category"),
+                })
+        return out
+
+    def _fetch_metar_worker(self, icao: str) -> None:
+        """Runs on its own thread. Touches no instance state; the result goes back through
+        run_in so the cache and health fields change only on the host loop."""
+        result: Dict[str, Any] = {"icao": icao, "fetched_at": time.time(), "source": None, "raw": None,
+                                  "observed_ts": None, "flight_category": None, "error": None,
+                                  "not_found": False}
+        errors: List[str] = []
+        try:
+            try:
+                text = self.http_get(METAR_VATSIM_URL.format(icao=icao), headers=METAR_HEADERS,
+                                     timeout=METAR_FETCH_TIMEOUT_SECONDS)
+                line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+                # The service answers 200 with an empty body for a station it does not have.
+                if line and icao in line.split()[:2]:
+                    result.update(source="metar_vatsim", raw=line)
+            except (FetchError, ValueError) as exc:
+                errors.append(f"vatsim: {getattr(exc, 'kind', type(exc).__name__)}: {exc}")
+            if result["raw"] is None:
+                try:
+                    text = self.http_get(METAR_AWC_URL.format(icao=icao), headers=METAR_HEADERS,
+                                         timeout=METAR_FETCH_TIMEOUT_SECONDS)
+                    # An empty body (204) means no report for that station.
+                    rows = json.loads(text) if text.strip() else []
+                    row = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else None
+                    if row and str(row.get("rawOb") or "").strip():
+                        result.update(source="metar_awc", raw=str(row["rawOb"]).strip())
+                        if isinstance(row.get("obsTime"), (int, float)):
+                            result["observed_ts"] = float(row["obsTime"])
+                        cat = str(row.get("fltCat") or "").upper()
+                        if cat in FLIGHT_CATEGORIES:
+                            result["flight_category"] = cat
+                except (FetchError, ValueError) as exc:
+                    errors.append(f"awc: {getattr(exc, 'kind', type(exc).__name__)}: {exc}")
+            if result["raw"] is not None:
+                if result["observed_ts"] is None:
+                    result["observed_ts"] = parse_metar_obs_time(result["raw"], datetime.now(timezone.utc))
+                if result["flight_category"] is None:
+                    result["flight_category"] = metar_flight_category(result["raw"])
+            elif errors:
+                result["error"] = "; ".join(errors)[:300]
+            else:
+                result["not_found"] = True
+        except Exception as exc:
+            result["raw"] = None
+            result["error"] = f"unexpected: {type(exc).__name__}: {exc}"[:300]
+        finally:
+            self.run_in(self._apply_metar_result, 0, result=result)
+
+    def _apply_metar_result(self, kwargs) -> None:
+        r: Dict[str, Any] = kwargs["result"]
+        icao = r["icao"]
+        self._metar_inflight.pop(icao, None)
+        if r.get("raw"):
+            self._metar_cache[icao] = {k: r[k] for k in ("source", "raw", "observed_ts", "flight_category", "fetched_at")}
+            self._metar_status = "ok"
+            self._metar_source_last = r["source"]
+            self._last_metar_error = None
+            self._last_metar_error_ts = None
+        elif r.get("not_found"):
+            self._metar_cache.pop(icao, None)
+            self._metar_status = "not_found"
+        else:
+            # Keep the last good METAR: _metar_attrs drops it once METAR_MAX_AGE_SECONDS old.
+            self._metar_status = "error"
+            self._last_metar_error = f"{icao}: {r.get('error')}"
+            self._last_metar_error_ts = r["fetched_at"]
+            self.log(f"METAR fetch failed for {icao}: {r.get('error')}", level="WARNING")
+        self._republish_destination()
 
     def _airport_distance_nm(self, icao: str, point: Point) -> Optional[float]:
         navdata = self._navdata
@@ -2944,7 +2993,7 @@ class VatsimAtcTracker(hass.Hass):
                  if navdata is not None else None)
         if coord is None:
             return None
-        return geopy_distance((point.y, point.x), coord).meters / 1852.0
+        return geo.distance_nm(point.y, point.x, coord[0], coord[1])
 
     def _publish_destination_offline(self) -> None:
         """Not connected: a typed-in airport still shows (state selected, from the last good feed),
@@ -2970,7 +3019,7 @@ class VatsimAtcTracker(hass.Hass):
     def _update_airborne_latch(self, point: Point, groundspeed_kt: float, pilot: dict, departure: str) -> None:
         # Refiled on the ground with a new departure: back to the departure phase. In the air
         # (a diversion changes the arrival) the latch holds.
-        if departure != (self._latched_departure or "") and groundspeed_kt <= self.takeoff_groundspeed_kt:
+        if departure != (self._latched_departure or "") and groundspeed_kt <= TAKEOFF_GROUNDSPEED_KT:
             self._reset_airborne_evidence()
         self._latched_departure = departure or None
 
@@ -2978,7 +3027,7 @@ class VatsimAtcTracker(hass.Hass):
             near = False
             if groundspeed_kt <= LANDED_GROUNDSPEED_KT and departure:
                 d = self._airport_distance_nm(departure, point)
-                near = d is not None and d <= self.departure_near_nm
+                near = d is not None and d <= DEPARTURE_NEAR_NM
             self._stopped_polls = self._stopped_polls + 1 if near else 0
             if self._stopped_polls >= LANDED_CONFIRM_POLLS:
                 self._reset_airborne_evidence()
@@ -2990,7 +3039,7 @@ class VatsimAtcTracker(hass.Hass):
         if altitude_ft is not None:
             self._ground_altitude_ft = (altitude_ft if self._ground_altitude_ft is None
                                         else min(self._ground_altitude_ft, altitude_ft))
-        if groundspeed_kt <= self.takeoff_groundspeed_kt:
+        if groundspeed_kt <= TAKEOFF_GROUNDSPEED_KT:
             self._fast_polls = 0
             return
         self._fast_polls += 1
@@ -3002,7 +3051,7 @@ class VatsimAtcTracker(hass.Hass):
             self._airborne_latched = True
             return
         d = self._airport_distance_nm(departure, point)
-        self._airborne_latched = d is not None and d > self.departure_near_nm
+        self._airborne_latched = d is not None and d > DEPARTURE_NEAR_NM
 
     def _publish_destination(self, point: Point, groundspeed_kt: float, pilot: dict, payload: dict) -> None:
         """sensor.vatsim_destination. State: selected (typed-in airport), departure (on the ground
@@ -3016,7 +3065,15 @@ class VatsimAtcTracker(hass.Hass):
             departure = str(flight_plan.get("departure") or "").strip().upper()
             arrival = str(flight_plan.get("arrival") or "").strip().upper()
             self._update_airborne_latch(point, groundspeed_kt, pilot, departure)
+            self._destination_ctx = (point, departure, arrival)
+            self._compose_destination(point, departure, arrival, payload)
+        except Exception as exc:
+            self.log(f"Airport ATIS update failed: {exc}", level="WARNING")
 
+    def _compose_destination(self, point: Point, departure: str, arrival: str, payload: dict) -> None:
+        """Everything in _publish_destination after the airborne latch. No per-poll counters
+        change here, so it is safe to call again between polls."""
+        try:
             override = self._atis_override()
             if override:
                 attrs = self._atis_attrs(payload, override, "selected")
@@ -3035,7 +3092,7 @@ class VatsimAtcTracker(hass.Hass):
                 if d is None:
                     self._publish_destination_state("position_unknown", attrs)
                 else:
-                    self._publish_destination_state("departure" if d <= self.departure_near_nm else "at_other_airport", attrs)
+                    self._publish_destination_state("departure" if d <= DEPARTURE_NEAR_NM else "at_other_airport", attrs)
                 return
 
             if not arrival:
@@ -3058,16 +3115,36 @@ class VatsimAtcTracker(hass.Hass):
         except Exception as exc:
             self.log(f"Airport ATIS update failed: {exc}", level="WARNING")
 
+    def _republish_destination(self) -> None:
+        """Recompute sensor.vatsim_destination from the last feed's ATIS list and the last
+        position. Connected: the full choice. Otherwise: typed-in airport or not_connected."""
+        try:
+            if self._presence_state == PresenceState.PRESENT and self._destination_ctx is not None:
+                point, departure, arrival = self._destination_ctx
+                self._compose_destination(point, departure, arrival, {"atis": self._last_atis_list})
+            else:
+                self._publish_destination_offline()
+        except Exception as exc:
+            self.log(f"Airport ATIS republish failed: {exc}", level="WARNING")
+
+    def _on_atis_override_change(self, entity, attribute, old, new, *args, **kwargs) -> None:
+        # *args/**kwargs: a host may pass callback kwargs positionally or by keyword;
+        # neither is used here.
+        if old != new:
+            self._republish_destination()
+
     def _publish_destination_state(self, state: str, attrs: Dict[str, Any]) -> None:
         full = {"friendly_name": "VATSIM Airport ATIS", "airport": None, "role": None,
                 "range_nm": self.destination_range_nm,
                 "distance_nm": None, "atis_online": False, "atis_callsign": None, "atis_code": None,
-                "atis_frequency": None, "atis_text": None, "atis_last_updated": None}
+                "atis_frequency": None, "atis_text": None, "atis_last_updated": None,
+                "weather_source": "none", "metar_text": None, "metar_source": None,
+                "metar_observed_at": None, "flight_category": None}
         full.update(attrs)
-        # Vatsim_destination_atis_changed tests this, not only pilot_connected.
+        # An alert on an ATIS letter change should test this, not only pilot_connected.
         # A failed presence-off write leaves that entity on while this one is accepted; a flag in
-        # the same write as the letter cannot disagree with it. A string, because AppDaemon's REST
-        # path drops False. It is in the dedupe key, so the change at connect and disconnect publishes.
+        # the same write as the letter cannot disagree with it. A string, because some hosts
+        # drop False. It is in the dedupe key, so the change at connect and disconnect publishes.
         full["session"] = "connected" if self._presence_state == PresenceState.PRESENT else "offline"
         # distance_nm changes every poll in flight, so dedupe on everything else plus whole-nm distance:
         # one write per nautical mile instead of one per poll.

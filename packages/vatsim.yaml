@@ -7,20 +7,23 @@
 #   input_text.vatsim_mute_gate optional entity that holds speech while it is not off
 # Replacing this file with a newer release therefore never touches your settings.
 #
-# The vatsim sensors, binary sensors and device tracker are written by the
-# AppDaemon app and are not in the entity registry. They do not exist after a
-# Home Assistant restart until the app publishes again (normally within one poll).
+# OPTIONAL. The integration works without this file; it adds spoken and pushed alerts
+# and the watchdogs.
+#
+# The tracker entities come from the VATSIM ATC Tracker integration (device "VATSIM
+# Tracker"). They are unavailable until it has published once, and for up to a minute
+# while it reloads. If you renamed any of them, change the ids here to match.
 template:
   # Lets the VATSIM dashboard pick between the Session Map and a placeholder.
   # Card visibility conditions are false for an entity that does not exist, so
-  # they cannot test device_tracker.vatsim_aircraft before the tracker's first
+  # they cannot test device_tracker.vatsim_tracker_aircraft before the tracker's first
   # publish. This entity always exists: off until the aircraft has a latitude
   # (missing entity, never flown, failed restore), on once it does.
   - binary_sensor:
       - name: VATSIM aircraft has position
         unique_id: vatsim_aircraft_has_position
         icon: mdi:map-marker-check
-        state: "{{ state_attr('device_tracker.vatsim_aircraft', 'latitude') is not none }}"
+        state: "{{ state_attr('device_tracker.vatsim_tracker_aircraft', 'latitude') is not none }}"
 
 input_boolean:
   vatsim_alerts_immediate:
@@ -66,16 +69,6 @@ input_datetime:
     name: VATSIM position last alert
     has_date: true
     has_time: true
-
-# Type an airport (KJFK) to show its ATIS on the dashboard's ATIS card, connected or not.
-# Blank = automatic (departure on the ground, arrival once airborne). The tracker upper-cases it.
-input_text:
-  vatsim_atis_airport:
-    name: VATSIM ATIS airport (blank = automatic)
-    icon: mdi:airport
-    min: 0
-    max: 5
-    pattern: "^[A-Za-z0-9]{0,5}$"
 
 input_select:
   vatsim_alert_mode:
@@ -231,7 +224,7 @@ automation:
     id: vatsim_atc_online_alert
     triggers:
       - trigger: state
-        entity_id: binary_sensor.vatsim_atc_coverage
+        entity_id: binary_sensor.vatsim_tracker_atc_coverage
         attribute: last_change_reason
         to: "became_controlled"
     conditions:
@@ -241,25 +234,25 @@ automation:
     actions:
       - delay: "00:00:20"
       - condition: state
-        entity_id: binary_sensor.vatsim_atc_coverage
+        entity_id: binary_sensor.vatsim_tracker_atc_coverage
         state: "on"
       - condition: template
         value_template: >-
-          {{ state_attr('binary_sensor.vatsim_atc_coverage', 'controller_callsign')
+          {{ state_attr('binary_sensor.vatsim_tracker_atc_coverage', 'controller_callsign')
              not in [none, '', 'unknown'] }}
       - action: script.vatsim_announce
         data:
           title: "VATSIM ATC Online"
           message: >-
             Attention. ATC is now online:
-            {{ state_attr('binary_sensor.vatsim_atc_coverage', 'controller_callsign') }}.
+            {{ state_attr('binary_sensor.vatsim_tracker_atc_coverage', 'controller_callsign') }}.
     mode: restart
 
   - alias: "VATSIM lookahead alert"
     id: vatsim_lookahead_alert
     triggers:
       - trigger: state
-        entity_id: sensor.vatsim_next_sector
+        entity_id: sensor.vatsim_tracker_next_sector
     conditions:
       - condition: state
         entity_id: input_boolean.vatsim_alerts_lookahead
@@ -274,7 +267,7 @@ automation:
                 trigger.to_state.attributes.get('controller_callsign') }}
       - condition: template
         value_template: >-
-          {{ states('sensor.vatsim_next_sector') not in
+          {{ states('sensor.vatsim_tracker_next_sector') not in
              ['unknown', 'unavailable', 'none', 'matches',
               'skipped_low_speed', 'skipped_unstable_heading',
               'skipped_insufficient_history'] }}
@@ -282,7 +275,7 @@ automation:
       # airspace), which has no controller; it announced "up ahead".
       - condition: template
         value_template: >-
-          {{ state_attr('sensor.vatsim_next_sector', 'controller_callsign')
+          {{ state_attr('sensor.vatsim_tracker_next_sector', 'controller_callsign')
              not in [none, '', 'unknown'] }}
     actions:
       - action: script.vatsim_announce
@@ -290,7 +283,7 @@ automation:
           title: "VATSIM Next ATC"
           message: >-
             Heads up. Next likely controller:
-            {{ state_attr('sensor.vatsim_next_sector', 'controller_callsign') }}.
+            {{ state_attr('sensor.vatsim_tracker_next_sector', 'controller_callsign') }}.
     mode: single
 
   # The ATIS letter changed for the airport the card is showing: the departure on the ground,
@@ -301,7 +294,7 @@ automation:
     id: vatsim_destination_atis_changed
     triggers:
       - trigger: state
-        entity_id: sensor.vatsim_destination
+        entity_id: sensor.vatsim_tracker_destination
         attribute: atis_code
     conditions:
       - condition: state
@@ -310,7 +303,7 @@ automation:
       # Only while connected. A typed-in airport (state selected) stays selected offline, and
       # its ATIS letter changes about hourly, which pushed for hours after a session.
       - condition: state
-        entity_id: binary_sensor.vatsim_pilot_connected
+        entity_id: binary_sensor.vatsim_tracker_pilot_connected
         state: "on"
       - condition: template
         value_template: >-
@@ -327,10 +320,10 @@ automation:
     actions:
       # Mode queued, so a run can start after the session ended.
       - condition: state
-        entity_id: binary_sensor.vatsim_pilot_connected
+        entity_id: binary_sensor.vatsim_tracker_pilot_connected
         state: "on"
       - condition: template
-        value_template: "{{ state_attr('sensor.vatsim_destination', 'session') == 'connected' }}"
+        value_template: "{{ state_attr('sensor.vatsim_tracker_destination', 'session') == 'connected' }}"
       - action: script.vatsim_announce
         data:
           title: "VATSIM ATIS"
@@ -352,11 +345,9 @@ automation:
     # input_select.vatsim_alert_mode and would suppress health alerts.
     #
     # All three triggers are templates, not numeric_state / state.
-    # sensor.vatsim_feed_health is pushed from AppDaemon over the REST API. On a
-    # host reboot or Supervisor update, AppDaemon is still starting when Core
-    # loads automations, so a numeric_state trigger against a not-yet-existing
-    # entity fails to initialize and never retries. A Core-only restart does not
-    # reproduce this, which is why it went unnoticed. Do not simplify these back.
+    # A template tolerates an entity that does not exist yet or is unavailable. A
+    # numeric_state trigger set up before the integration has loaded does not.
+    # Do not simplify these back.
     triggers:
       # VATSIM fetch failing while the tracker is alive. The old test on
       # feed_age_seconds never fired: a failed fetch publishes it as null (0),
@@ -367,8 +358,8 @@ automation:
       # successful fetch yet (null) reads as 0 and does not fire.
       - trigger: template
         value_template: >-
-          {% set fh = states.sensor.vatsim_feed_health %}
-          {% set last = state_attr('sensor.vatsim_feed_health', 'last_success_ts') | float(0) %}
+          {% set fh = states.sensor.vatsim_tracker_feed_health %}
+          {% set last = state_attr('sensor.vatsim_tracker_feed_health', 'last_success_ts') | float(0) %}
           {{ fh is not none and last > 0
              and as_timestamp(now()) - last > 180
              and as_timestamp(now()) - as_timestamp(fh.last_updated) < 150 }}
@@ -383,24 +374,24 @@ automation:
       # covers the startup parse; a slower parse alerts once.
       - trigger: template
         value_template: >-
-          {{ state_attr('sensor.vatsim_feed_health','navdata_load_issue_count') | int(0) > 0
-             or state_attr('sensor.vatsim_feed_health','navdata_status')
+          {{ state_attr('sensor.vatsim_tracker_feed_health','navdata_load_issue_count') | int(0) > 0
+             or state_attr('sensor.vatsim_tracker_feed_health','navdata_status')
                 in ['configured_but_unloaded', 'configured_but_empty', 'expired'] }}
         for: "00:05:00"
         id: navdata_degraded
       # Coverage geometry unusable, so ATC alerts stop firing silently.
-      # Tests geometry_status, NOT coverage_evaluation_ready: AppDaemon
-      # publishes that bool as the STRING "true", so `is not true` is always
-      # True and fired a false alarm. Both come from `self._geometry is not
+      # Tests geometry_status, NOT coverage_evaluation_ready: a host that
+      # publishes that bool as the STRING "true" makes `is not true` always
+      # True, a false alarm. Both come from `self._geometry is not
       # None` in the tracker, so this is the same signal without the
       # serialization trap. `gs is not none` means a missing attribute does not
       # fire, biased toward under-alerting when instrumentation is partial.
       - trigger: template
         value_template: >-
-          {% set gs = state_attr('sensor.vatsim_feed_health','geometry_status') %}
-          {{ states('sensor.vatsim_feed_health') not in ['unknown', 'unavailable']
+          {% set gs = state_attr('sensor.vatsim_tracker_feed_health','geometry_status') %}
+          {{ states('sensor.vatsim_tracker_feed_health') not in ['unknown', 'unavailable']
              and gs is not none and gs != 'ready'
-             and is_state('binary_sensor.vatsim_pilot_connected', 'on') }}
+             and is_state('binary_sensor.vatsim_tracker_pilot_connected', 'on') }}
         for: "00:05:00"
         id: coverage_down
       # The gate above moved into the trigger. As an action condition it
@@ -410,7 +401,7 @@ automation:
       # last_success_ts stays fresh and feed_stale cannot see it.
       - trigger: template
         value_template: >-
-          {{ state_attr('sensor.vatsim_feed_health','timestamp_status') == 'processing_error' }}
+          {{ state_attr('sensor.vatsim_tracker_feed_health','timestamp_status') == 'processing_error' }}
         for: "00:05:00"
         id: processing_error
     actions:
@@ -425,7 +416,7 @@ automation:
                 data:
                   title: "VATSIM navdata degraded"
                   message: >-
-                    {% set h = 'sensor.vatsim_feed_health' %}{% if state_attr(h,'navdata_status') == 'expired' %}Navdata
+                    {% set h = 'sensor.vatsim_tracker_feed_health' %}{% if state_attr(h,'navdata_status') == 'expired' %}Navdata
                     AIRAC {{ state_attr(h,'navdata_cycle') or 'unknown' }} expired on
                     {{ state_attr(h,'navdata_valid_until') }}: update it and the tracker
                     reloads within an hour.{% else %}Navdata loaded with
@@ -438,7 +429,7 @@ automation:
               - condition: trigger
                 id: feed_stale
               - condition: state
-                entity_id: binary_sensor.vatsim_pilot_connected
+                entity_id: binary_sensor.vatsim_tracker_pilot_connected
                 state: "on"
             sequence:
               - action: script.vatsim_notify
@@ -447,9 +438,9 @@ automation:
                   message: >-
                     No successful VATSIM fetch in
                     {{ (as_timestamp(now())
-                        - state_attr('sensor.vatsim_feed_health','last_success_ts') | float(0))
+                        - state_attr('sensor.vatsim_tracker_feed_health','last_success_ts') | float(0))
                        | int }} s; the tracker is running
-                    ({{ state_attr('sensor.vatsim_feed_health','consecutive_failures') | int(0) }}
+                    ({{ state_attr('sensor.vatsim_tracker_feed_health','consecutive_failures') | int(0) }}
                     failures in a row).
                   # One notification per outage. A later tracker-silent push
                   # with this tag replaces this one, without a second alert while it is showing.
@@ -458,7 +449,7 @@ automation:
               - condition: trigger
                 id: coverage_down
               - condition: state
-                entity_id: binary_sensor.vatsim_pilot_connected
+                entity_id: binary_sensor.vatsim_tracker_pilot_connected
                 state: "on"
             sequence:
               - action: script.vatsim_notify
@@ -466,7 +457,7 @@ automation:
                   title: "VATSIM coverage evaluation down"
                   message: >-
                     Geometry status:
-                    {{ state_attr('sensor.vatsim_feed_health','geometry_status') }}.
+                    {{ state_attr('sensor.vatsim_tracker_feed_health','geometry_status') }}.
                     ATC alerts will not fire.
           # Not session-gated; a processing fault can hide the session itself.
           - conditions:
@@ -478,7 +469,7 @@ automation:
                   title: "VATSIM tracker processing error"
                   message: >-
                     The feed is reachable but the tracker has failed to process it
-                    for 5 min. Check the AppDaemon log for the traceback.
+                    for 5 min. Check the Home Assistant log for vatsim_atc.
     mode: single
 
   - alias: "VATSIM: mute gate unavailable"
@@ -613,15 +604,13 @@ automation:
   - alias: "VATSIM: aircraft position missing"
     id: vatsim_aircraft_position_watchdog
     description: >-
-      Watchdog for the tracker's restart-survival path
-      (_reconcile_published_states and vatsim_last_aircraft.json in the
-      AppDaemon apps dir). The Session Map's initial view needs a latitude on
-      device_tracker.vatsim_aircraft; without one it renders as a blank frame
-      with no error. The tracker republishes the last saved position after an
-      HA or AppDaemon restart, so a healthy feed with no latitude for 10 min
-      means that path failed (missing or corrupt save file, or set_state not
-      sticking). Check the AppDaemon log for "aircraft position" and
-      "republishing". Gated on a healthy feed so a dead tracker, which
+      Watchdog for the saved aircraft position. The Session Map's initial view
+      needs a latitude on device_tracker.vatsim_tracker_aircraft; without one it renders
+      as a blank frame with no error. The tracker saves the last position and
+      publishes it again after a restart, so a healthy feed with no latitude for
+      10 min means that failed (missing or corrupt save file). On a new install
+      it is expected, and clears on the first connection. Check the Home
+      Assistant log for "saved aircraft position". Gated on a healthy feed so a dead tracker, which
       vatsim_feed_unhealthy_v2 owns, does not page twice. Notifies directly,
       not via script.vatsim_announce, for the same reason as that automation.
 
@@ -635,20 +624,20 @@ automation:
     mode: single
     max_exceeded: silent
     triggers:
-      # Template, not state: both entities are pushed over REST and do not
-      # exist when Core loads automations. state_attr on a missing entity is
+      # Template, not state: the entities may not exist yet when Core loads
+      # automations. state_attr on a missing entity is
       # none, so "entity missing" and "entity without position" both match.
       - trigger: template
         value_template: >-
-          {{ states('sensor.vatsim_feed_health') == 'healthy'
-             and state_attr('device_tracker.vatsim_aircraft', 'latitude') is none }}
+          {{ states('sensor.vatsim_tracker_feed_health') == 'healthy'
+             and state_attr('device_tracker.vatsim_tracker_aircraft', 'latitude') is none }}
         for: "00:10:00"
         id: missing
       # Complement of the missing predicate with the same 10 min dwell.
       - trigger: template
         value_template: >-
-          {{ not (states('sensor.vatsim_feed_health') == 'healthy'
-                  and state_attr('device_tracker.vatsim_aircraft', 'latitude') is none) }}
+          {{ not (states('sensor.vatsim_tracker_feed_health') == 'healthy'
+                  and state_attr('device_tracker.vatsim_tracker_aircraft', 'latitude') is none) }}
         for: "00:10:00"
         id: ok
       - trigger: time_pattern
@@ -656,8 +645,8 @@ automation:
         id: sweep
     variables:
       missing_now: >-
-        {{ states('sensor.vatsim_feed_health') == 'healthy'
-           and state_attr('device_tracker.vatsim_aircraft', 'latitude') is none }}
+        {{ states('sensor.vatsim_tracker_feed_health') == 'healthy'
+           and state_attr('device_tracker.vatsim_tracker_aircraft', 'latitude') is none }}
       # Below 1e9 means unset (cleared to 1970, missing, or never written). Exactly
       # 00:00:00 is also unset: a new input_datetime starts at install-day midnight,
       # which would read as an episode already hours old.
@@ -730,37 +719,38 @@ automation:
                   notification_id: vatsim_position_missing
                   title: "VATSIM map has no aircraft position"
                   message: >-
-                    device_tracker.vatsim_aircraft is
-                    {{ 'missing' if states.device_tracker.vatsim_aircraft is none
+                    device_tracker.vatsim_tracker_aircraft is
+                    {{ 'missing' if states.device_tracker.vatsim_tracker_aircraft is none
                        else 'present without a position' }}
-                    while the feed is healthy. The Session Map will be blank. Check
-                    the AppDaemon log for the restore and save-file messages.
+                    while the feed is healthy. The Session Map will be blank. On a
+                    new install this clears on your first flight. Otherwise check
+                    the Home Assistant log for vatsim_atc.
               - action: script.vatsim_notify
                 continue_on_error: true
                 data:
                   title: "VATSIM map has no aircraft position"
                   message: >-
-                    device_tracker.vatsim_aircraft is
-                    {{ 'missing' if states.device_tracker.vatsim_aircraft is none
+                    device_tracker.vatsim_tracker_aircraft is
+                    {{ 'missing' if states.device_tracker.vatsim_tracker_aircraft is none
                        else 'present without a position' }}
-                    while the feed is healthy. The Session Map will be blank. Check
-                    the AppDaemon log for the restore and save-file messages.
+                    while the feed is healthy. The Session Map will be blank. On a
+                    new install this clears on your first flight. Otherwise check
+                    the Home Assistant log for vatsim_atc.
 
   - alias: "VATSIM: tracker not publishing"
     id: vatsim_tracker_silent_watchdog
     description: >-
-      The AppDaemon tracker republishes
-      sensor.vatsim_feed_health on every poll (about 18 s; feed_age_seconds
-      changes each time, so last_updated moves). A tracker that stops (AppDaemon
-      crash, app error) leaves every vatsim entity frozen at its last value,
+      The tracker publishes
+      sensor.vatsim_tracker_feed_health on every poll (about 18 s; feed_age_seconds
+      changes each time, so last_updated moves). A tracker that stops (the
+      integration unloaded or failing) leaves every vatsim entity frozen at its last value,
       feed_age_seconds included (about 18 s), so vatsim_feed_unhealthy_v2's
-      feed_stale never fires and binary_sensor.vatsim_pilot_connected cannot be
+      feed_stale never fires and binary_sensor.vatsim_tracker_pilot_connected cannot be
       trusted. This tests freshness instead, with no pilot gate: a dead tracker
       is reported once per episode whether or not a session is active.
         silent trigger   last_updated more than 180 s old (10 polls)
-        start trigger    10 min after HA starts: the sensor missing (REST
-                         entities are gone after an HA restart until the
-                         tracker republishes, normally within about 20 s) or
+        start trigger    10 min after HA starts: the sensor missing (the
+                         integration not set up, or not loaded) or
                          stale
         sweep (/15)      a sensor already stale when automations load; it does
                          not treat a missing sensor as silent (that case is
@@ -776,12 +766,12 @@ automation:
     triggers:
       - trigger: template
         value_template: >-
-          {% set s = states.sensor.vatsim_feed_health %}
+          {% set s = states.sensor.vatsim_tracker_feed_health %}
           {{ s is not none and (now() - s.last_updated).total_seconds() > 180 }}
         id: silent
       - trigger: template
         value_template: >-
-          {% set s = states.sensor.vatsim_feed_health %}
+          {% set s = states.sensor.vatsim_tracker_feed_health %}
           {{ s is not none and (now() - s.last_updated).total_seconds() < 60 }}
         for: "00:02:00"
         id: ok
@@ -801,13 +791,13 @@ automation:
       - variables:
           # Seconds since the last publish; -1 when the sensor does not exist.
           s_age: >-
-            {% set s = states.sensor.vatsim_feed_health %}
+            {% set s = states.sensor.vatsim_tracker_feed_health %}
             {{ ((now() - s.last_updated).total_seconds() | round(0) | int) if s is not none else -1 }}
           silent: "{{ s_age > 180 or (s_age < 0 and trigger.id == 'start') }}"
           alerted: "{{ is_state('input_boolean.vatsim_tracker_silent_alerted', 'on') }}"
           what: >-
-            {% if s_age < 0 %}sensor.vatsim_feed_health is missing 10 min after HA started
-            {%- else %}sensor.vatsim_feed_health last updated {{ (s_age / 60) | round(0) | int }} min ago{% endif %}
+            {% if s_age < 0 %}sensor.vatsim_tracker_feed_health is missing 10 min after HA started
+            {%- else %}sensor.vatsim_tracker_feed_health last updated {{ (s_age / 60) | round(0) | int }} min ago{% endif %}
       - choose:
           - conditions:
               - condition: template
@@ -833,14 +823,14 @@ automation:
                   title: "VATSIM tracker not publishing"
                   message: >-
                     {{ what }}. ATC announcements, the lookahead and the Session Map
-                    are frozen. Check the AppDaemon add-on and its log.
+                    are frozen. Check the VATSIM ATC Tracker integration and the Home Assistant log.
               # No continue_on_error: a push that raises is retried. One the notify service
               # only logs is not.
               - action: script.vatsim_notify
                 data:
                   title: "VATSIM tracker not publishing"
                   message: >-
-                    {{ what }}. ATC announcements and the map are frozen. Check AppDaemon.
+                    {{ what }}. ATC announcements and the map are frozen. Check the integration.
                   # Replaces a feed-stale push from the same outage.
                   tag: vatsim_tracker_outage
               - action: input_boolean.turn_on

@@ -1,282 +1,199 @@
 # VATSIM ATC Tracker for Home Assistant
 
-Know when ATC comes online along your route before you call them. This AppDaemon app watches the live VATSIM network for your pilot connection. It publishes Home Assistant entities for your position, the ATC coverage you are in, the sector you are about to enter and when, your filed route drawn on a map, the ATIS at your departure or arrival, and the controller boundaries online right now. Optional spoken and push alerts go where you choose.
+Know when ATC comes online along your route before you call them. This integration follows your VATSIM pilot connection and gives Home Assistant your position, the controller covering you, the sector you are about to enter and when, your filed route as a line on a map, the ATIS at your departure or arrival, and the boundaries of every controller online right now.
 
-![Dashboard main view: flight status, radios, ATIS, telemetry and session map](docs/images/dashboard_main.png)
+It is a custom integration: one install, one setup dialog that asks for your VATSIM CID, no extra Python packages and no add-on.
 
-*Captured in flight. The callsign is replaced with a placeholder; nothing else is altered. Taken on a development build: the METAR line in the ATIS card is not in `v1.0.0-rc2`.*
+Needs Home Assistant 2026.10 or later.
+
+**Status: beta (2.0.0b1).** Version 2 is a rewrite of this project as a Home Assistant integration. The tracking logic is the same as version 1, the AppDaemon app, and was compared against it on live data. The Home Assistant side is new. Expect rough edges and please report them.
+
+![The dashboard in flight](docs/images/dashboard_main.png)
+
+*Captured in flight on the author's install. The callsign is replaced with a placeholder; nothing else is altered. The ATIS card here shows a METAR, which the dashboard file in this release does not draw yet.*
 
 ---
 
-## Features
+## What you get
 
 **Pilot connection**
-- Detects when your VATSIM CID connects and disconnects, with a presence state and last-seen time.
-- Publishes your aircraft as a `device_tracker` (callsign, altitude, groundspeed, heading), so any map card can follow you.
-- Keeps a session track (breadcrumb trail) of the current connection, broken cleanly when you respawn somewhere else.
-- Remembers your last position across restarts, so the map is not blank between flights.
+- Detects when your CID connects and disconnects, debounced so one missed poll is not a disconnect.
+- Your aircraft as a device tracker (callsign, altitude, groundspeed, heading), so any map card can follow it.
+- A session track: the breadcrumb trail of the current connection, broken cleanly if you respawn somewhere else.
+- Your last position, kept across restarts, so the map is not blank between flights.
 
 **ATC coverage**
-- Tells you whether the airspace you are in is controlled, and by whom (callsign and frequency).
-- Centre and FSS boundaries come from the VAT-Spy Client Data Update Project and are downloaded by the app. Approach and departure boundaries are optional and come from a SimAware TRACON Project file you supply. Tower, ground and delivery are not tracked.
-- Publishes a GeoJSON layer of every online controller's boundary, plus the sector you are in and the next one.
-- Above 18,000 ft (configurable) approach and departure sectors are ignored, so cruise is not cluttered with terminal coverage below you.
+- Whether the airspace you are in is controlled, and by whom (callsign and frequency).
+- Centre and FSS boundaries come from the VAT-Spy Client Data Update Project, downloaded by the integration. Approach and departure boundaries are optional and come from a SimAware TRACON Project file you supply. Tower, ground and delivery are not tracked.
+- A map layer of every online controller's boundary, plus the sector you are in and the next one.
+- Above 18,000 ft, approach and departure sectors are ignored, so cruise is not cluttered with terminal coverage below you.
 
 **Lookahead**
-- Projects your track forward (10 minutes by default) and predicts the next controlled sector, with an ETA and distance.
-- Holds the prediction when it would be noise. Below 30 kt, with a heading that moved more than 20 degrees between polls, or with fewer than 3 polls of history, the sensor reports why it skipped. All three thresholds are config keys.
+- Projects your track forward (10 minutes by default) and predicts the next controlled sector, with an ETA and a distance.
+- Holds the prediction when it would be noise: below 30 kt, with a heading still changing, or with too little history. The sensor says why it skipped.
 
-**Route plotting**
-- Resolves your filed flight plan against navigation data you supply: fixes, navaids, airways and oceanic lat/lon points are plotted. SID and STAR names and anything else it cannot place are skipped and counted, never guessed.
-- Anchors the line at your departure and arrival airports.
-- Expands North Atlantic Tracks. A filed `NATD` becomes the oceanic waypoints of the track in force, read from natTrak and refreshed every 30 minutes. An expired track snapshot draws nothing.
-- Disambiguates duplicate identifiers by proximity to the previous point on the route.
+**Route**
+- Draws your filed flight plan as a line, resolved against navigation data you supply: fixes, navaids, airways and oceanic lat/lon points. SID and STAR names and anything it cannot place are skipped and counted, never guessed.
+- Expands North Atlantic Tracks from natTrak.
 
 **Airport ATIS**
-- On the ground at your filed departure: the departure ATIS. Airborne and within 100 nm of your arrival: the arrival ATIS. Or type any airport into the ATIS box to pin it, connected or not.
+- On the ground at your filed departure: the departure ATIS. Airborne and within 100 nm of your arrival: the arrival ATIS. Or type any airport into the ATIS airport box to pin it, connected or not.
+- When the airport has no ATIS online, its METAR, with the flight category.
 
-**Alerts** (optional, all switchable from the dashboard)
-- ATC online: a controller came online covering your position.
-- Lookahead: the next controller ahead, before you reach their airspace.
-- ATIS: the letter changed at the airport on the ATIS card (spoken phonetically).
-- An alert mode selector (`Disabled`, `Push + Speaker`, `Push Only`, `Speaker Only`) with a one-tap cycle script.
-- Per-speaker toggles.
-- An optional mute gate: name any on/off entity and VATSIM speech plays only while it reads `off`.
-
-![Dashboard alerts view: alert mode, alert toggles and speaker targets](docs/images/dashboard_alerts.png)
-
-*Captured from a running install. The speaker buttons are whatever you configure; the example config ships two.*
-
-**Health and watchdogs**
-- `sensor.vatsim_feed_health` reports feed age, boundary, navdata and NAT track status, the navdata AIRAC cycle and its expiry, and the last refresh errors.
-- Watchdog automations notify you when the feed cannot be fetched, the tracker stops publishing, the tracker fails to process the feed, navdata is missing, incomplete or expired, the aircraft position is lost, or a configured mute gate is unavailable. These call the push script directly and ignore the alert mode, so silencing announcements never silences a failure.
-- The app verifies on every poll that Home Assistant actually holds what it wrote, and repairs it after a restart.
+**Health**
+- One diagnostic sensor reports feed age, the state of boundaries, navigation data and NAT tracks, the navigation data cycle and its expiry, and the last errors. Everything fails soft and says so there.
 
 ---
 
-## How it works
+## Install
 
-```
-VATSIM data feed --+
-VAT-Spy boundaries +--> AppDaemon app (vatsim_atc_tracker.py) --> HA entities --> packages (alerts, watchdogs)
-natTrak (NATs) ----+                                                          +-> dashboard (map, cards)
-Your navdata ------+
-Your SimAware file +
-```
+**With HACS (or the Home Assistant Marketplace, where your version has it)**
 
-The app runs inside the AppDaemon add-on and writes its entities into Home Assistant's state machine through AppDaemon. No long-lived token or URL is configured. A few consequences follow:
+1. Add this repository as a custom repository of type **Integration**: `https://github.com/SavBuilds/vatsim_ha_tracker`
+2. Install **VATSIM ATC Tracker** and restart Home Assistant.
 
-- The entities are **not in the entity registry**. You cannot rename them, give them an area, or change their icon in the UI. They appear in Developer Tools > States once the app has published.
-- They **do not exist after a Home Assistant restart** until the app writes them again, normally within one poll (18 seconds). The package's watchdogs use template triggers and tolerate a missing entity for that reason. Write your own automations to tolerate it too: test `states.sensor.vatsim_feed_health is none` or use `has_value()`.
-- **Attribute types are not what the code sets.** As written by AppDaemon, an attribute that is `true` arrives as the string `true`, and an attribute that is `false`, `0` or empty is **absent**. In templates, compare with `| string | lower == 'true'`, read counts with `| int(0)`, and never use `is true` or `is false`.
+**By hand**
 
----
+1. Copy the folder `custom_components/vatsim_atc` into your Home Assistant `config/custom_components/` folder.
+2. Restart Home Assistant.
 
-## Requirements
+**Then set it up**
 
-| Item | Notes |
-|---|---|
-| Home Assistant OS or Supervised | Tested on Core 2026.10 |
-| AppDaemon add-on | `a0d7b954_appdaemon` from the Home Assistant Community Add-ons repository. Tested on add-on 0.19.3 |
-| Python packages (add-on option `python_packages`) | `requests>=2.31`, `shapely>=2.0`, `geopy>=2.4` |
-| A VATSIM account | Your CID only. No VATSIM login or API key is used |
-| Navigation data | Supplied by you (step 3). Needed for route plotting, the ATIS card's distance logic, and NAT tracks |
-| SimAware TRACON boundaries | Optional, supplied by you (step 3). Needed for approach and departure coverage |
-| Dashboard cards (HACS) | [button-card](https://github.com/custom-cards/button-card) (tested v7.0.1), [Mushroom](https://github.com/piitaya/lovelace-mushroom) (tested v5.3.0), [map-card](https://github.com/nathan-gs/ha-map-card) (tested v1.16.0) |
-| A TTS entity and media players | Only if you want spoken alerts |
+Settings > Devices & services > Add integration > **VATSIM ATC Tracker**, and enter your VATSIM CID. That is the only required setting. No VATSIM login or API key is used.
+
+Within about 20 seconds the device "VATSIM Tracker" shows a feed health of `healthy`.
 
 ---
 
-## Installation
+## Optional data
 
-### 1. Install AppDaemon
+Both are set under the integration's **Configure** button. Paths are as Home Assistant sees them, so a folder on your config share is `/config/...`.
 
-Settings > Add-ons > Add-on Store > **AppDaemon**. On its Configuration tab, add the three Python packages:
+**Navigation data** (for the route line and NAT tracks). The integration reads X-Plane 12 format files: `earth_fix.dat`, `earth_nav.dat`, `earth_awy.dat`, `earth_aptmeta.dat`. This repository ships none.
 
-```yaml
-python_packages:
-  - requests>=2.31
-  - shapely>=2.0
-  - geopy>=2.4
-```
+- Navigraph subscribers: in Navigraph FMS Data Manager, add an X-Plane 12 entry with a manual path pointing at a folder on your Home Assistant config share, for example `vatsim/navdata`. Run it again each AIRAC cycle; the integration notices changed files within the hour.
+- Otherwise: copy the same four files from your own X-Plane 12 installation.
+- Then set the navigation data folder to, for example, `/config/vatsim/navdata`.
 
-Enable **Start on boot** and **Watchdog**, and start it once so it creates its config folder.
-
-### 2. Copy the app
-
-Copy the folder `apps/vatsim_atc_tracker/` into the AppDaemon apps folder. From the Samba or SSH add-on, that folder is:
-
-```
-/addon_configs/a0d7b954_appdaemon/apps/
-```
-
-**Path trap.** Inside the AppDaemon container, `/config` is the AppDaemon add-on's own folder, **not** your Home Assistant config. Your Home Assistant config directory is `/homeassistant`. Every path in `apps.yaml` must use the container's view.
-
-### 3. Add your data (optional, but most features want it)
-
-**Navigation data.** The tracker reads X-Plane 12 format files: `earth_fix.dat`, `earth_nav.dat`, `earth_awy.dat`, `earth_aptmeta.dat`. This repository ships no navigation data.
-
-- **Navigraph subscribers:** in Navigraph FMS Data Manager, add an X-Plane 12 entry with a manual path pointing at a folder on your Home Assistant config share, for example `vatsim/navdata`. Run Data Manager again each AIRAC cycle. The tracker notices changed files within the hour and warns you when the cycle expires.
-- **Without Navigraph:** copy the same four files from your own X-Plane 12 installation.
-
-**Approach and departure boundaries.** The [SimAware TRACON Project](https://github.com/vatsimnetwork/simaware-tracon-project) keeps one boundary per file, and the tracker reads a single GeoJSON file, so build one on any computer with Python:
+**Approach and departure boundaries.** Build one file from the SimAware TRACON Project on any PC with Python:
 
 ```
 git clone https://github.com/vatsimnetwork/simaware-tracon-project
 python tools/build_simaware.py simaware-tracon-project TRACONBoundaries.geojson
 ```
 
-Place the result in your config share, for example `vatsim/simaware/`, and point `simaware_boundaries_path` at it. Run the script again to refresh the boundaries. A folder also works as the path, but only its `*.geojson` files are read.
+Copy `TRACONBoundaries.geojson` to your config share, for example `vatsim/simaware/`, and set the SimAware path to `/config/vatsim/simaware/TRACONBoundaries.geojson`.
 
-### 4. Configure the app
+The other two options are the lookahead time in minutes and whether to show a METAR when an airport has no ATIS.
 
-Add this to `/addon_configs/a0d7b954_appdaemon/apps/apps.yaml`. Only `vatsim_cid` is required. Every option, with its default and unit, is in `apps/vatsim_atc_tracker/apps.yaml.example`.
+---
 
-```yaml
-vatsim_atc_tracker:
-  module: vatsim_atc_tracker
-  class: VatsimAtcTracker
-  vatsim_cid: 1234567                  # your VATSIM CID
-  navdata_path: /homeassistant/vatsim/navdata
-  simaware_boundaries_path: /homeassistant/vatsim/simaware/TRACONBoundaries.geojson
-```
+## Entities
 
-Restart the AppDaemon add-on and open its **Log** tab. A healthy start shows, within a minute:
+All belong to the device **VATSIM Tracker**. The ids below are the defaults.
 
-```
-Geometry snapshot swapped in (version=1, ...)
-Navdata snapshot swapped in (version=1, ..., load_issues=0)
-```
+| Entity | State | Useful attributes |
+|---|---|---|
+| `binary_sensor.vatsim_tracker_pilot_connected` | on while your CID is connected | `presence_state` |
+| `device_tracker.vatsim_tracker_aircraft` | position | `callsign`, `altitude_ft`, `groundspeed_kt`, `heading_deg`, `session_active`, `last_seen_ts` |
+| `binary_sensor.vatsim_tracker_atc_coverage` | on while a controller covers you | `controller_callsign`, `frequency`, `polygon_id`, `boundary_geojson` |
+| `sensor.vatsim_tracker_next_sector` | result of the lookahead | `result_kind`, `next_controller_callsign`, `next_frequency`, `eta_text`, `eta_minutes`, `eta_distance_nm`, `next_boundary_geojson` |
+| `sensor.vatsim_tracker_destination` | which airport the ATIS card shows | `atis_online`, `atis_code`, `atis_frequency`, `range_nm`, `session`, and the METAR fields |
+| `sensor.vatsim_tracker_flight_route` | state of the route line | `departure`, `arrival`, `resolved_waypoint_count`, `unresolved_token_count`, `route_geojson` |
+| `sensor.vatsim_tracker_session_track` | state of the track | `point_count`, `track_geojson` |
+| `sensor.vatsim_tracker_online_atc_boundaries` | number of controllers drawn | `all_boundaries_geojson` |
+| `sensor.vatsim_tracker_feed_health` (diagnostic) | `healthy`, `degraded` or `unavailable` | `geometry_status`, `navdata_status`, `navdata_cycle`, `navdata_valid_until`, `nat_track_status`, `feed_age_seconds`, and the last errors |
+| `text.vatsim_tracker_atis_airport` (configuration) | the pinned airport, blank for automatic | |
 
-A missing or placeholder `vatsim_cid`, or a value that is not a number where one is needed, logs `Configuration error, app not started:` naming the key. A `navdata_path` that holds none of the four files logs an ERROR with the path as the container resolved it.
+Things worth knowing when you write automations:
 
-### 5. Install the Home Assistant packages
+- **Entities are unavailable until first published**, and for up to a minute while the integration reloads with navigation data. A template trigger copes with that; a numeric state trigger set up too early may not.
+- **The map layers are not recorded.** The GeoJSON attributes and the track's `points` are large and are kept out of the database by the integration.
+- **Attribute types are real**: booleans are booleans and a zero is present.
 
-Two files: `vatsim.yaml` is the logic and is never edited, `vatsim_user.yaml` holds your settings. A later release replaces the first and leaves the second alone.
+---
+
+## Dashboard
+
+`dashboard/vatsim_dashboard.yaml` is a ready-made dashboard: status, active and next frequency, ATIS, a session map with the route, the track and the online boundaries.
+
+1. Install three cards (HACS or the Marketplace): [button-card](https://github.com/custom-cards/button-card), [Mushroom](https://github.com/piitaya/lovelace-mushroom), [map-card](https://github.com/nathan-gs/ha-map-card). Hard-refresh the browser.
+2. Settings > Dashboards > Add dashboard > New dashboard from scratch.
+3. Open it, choose Edit, then the three dots > Raw configuration editor, replace everything with the file's contents, and save.
+
+The second view, **Alerts**, uses helpers from the optional alerts package below. Delete that view if you do not install the package.
+
+The dashboard in this release does not yet draw the METAR on the ATIS card; the attributes are there if you want to add it.
+
+---
+
+## Alerts and watchdogs (optional)
+
+The integration itself only provides entities. `packages/` holds a Home Assistant package that adds:
+
+- spoken and pushed alerts: a controller came online covering you, the next controller ahead, the ATIS letter changed;
+- an alert mode (`Disabled`, `Push + Speaker`, `Push Only`, `Speaker Only`), per-speaker switches and an optional mute gate;
+- watchdogs that tell you when the feed cannot be fetched, the tracker stops publishing, navigation data is missing or expired, or the aircraft position is lost. These ignore the alert mode, so silencing announcements never silences a failure.
+
+To use it:
 
 1. Enable packages if you have not already. In `configuration.yaml`:
    ```yaml
    homeassistant:
      packages: !include_dir_named packages
    ```
-2. Copy `packages/vatsim.yaml` to `/homeassistant/packages/vatsim.yaml`.
-3. Copy `packages/vatsim_user.example.yaml` to `/homeassistant/packages/vatsim_user.yaml` and edit its four numbered sections:
-   1. speaker toggles: one `input_boolean` per speaker
-   2. the optional mute gate entity (leave blank for none)
-   3. where pushes go: the default is a sidebar notification; change the action to `notify.mobile_app_<device>` for your phone
-   4. your TTS entity and the speaker map (toggle: `media_player`)
-4. Back up, then Developer Tools > YAML > **Check configuration**, then restart Home Assistant.
+2. Copy `packages/vatsim.yaml` to `config/packages/vatsim.yaml`. Do not edit it.
+3. Copy `packages/vatsim_user.example.yaml` to `config/packages/vatsim_user.yaml` and edit its four numbered sections: your speaker switches, the optional mute gate, where pushes go (the default is a notice in the sidebar; change it to `notify.mobile_app_<device>` for your phone), and your TTS entity with the speaker map.
+4. Take a backup, then Developer Tools > YAML > Check configuration, then restart.
 
-### 6. Add the dashboard
-
-1. Install the three cards through HACS (see Requirements), then hard-refresh the browser.
-2. Settings > Dashboards > Add dashboard > **New dashboard from scratch**, named `VATSIM`.
-3. Open it, choose Edit dashboard > **Raw configuration editor**, paste in the contents of `dashboard/vatsim_dashboard.yaml`, and save.
-4. On the Alerts view, edit the two speaker buttons to match the toggles you defined in `vatsim_user.yaml`.
-
-Dashboard YAML goes into the raw configuration editor only. It never goes in `packages/`.
-
-### 7. Verify
-
-Check Developer Tools > States. The first three rows are true whether or not you are connected.
-
-| Entity | Healthy |
-|---|---|
-| `sensor.vatsim_feed_health` | state `healthy`; `geometry_status: ready`; `navdata_status: active` (or `disabled` without navdata); `feed_age_seconds` normally under 60 |
-| `binary_sensor.vatsim_pilot_connected` | `on` while you are connected, with `cid` matching yours |
-| `sensor.vatsim_destination` | `not_connected` when offline |
-| `device_tracker.vatsim_aircraft` | has `latitude` and `longitude` once you have connected at least once |
-| `sensor.vatsim_flight_route` | state `ok` and no `unresolved_token_count` for a clean route |
-
----
-
-## Entity reference
-
-All are written by the app. Every entity also carries `friendly_name` and an internal `pub_token`.
-
-| Entity | State | Key attributes |
-|---|---|---|
-| `sensor.vatsim_feed_health` | `healthy`, `degraded`, `unavailable` | see below |
-| `binary_sensor.vatsim_pilot_connected` | `on` / `off` | `presence_state` (`unknown`, `present`, `suspect_missing`, `absent`), `cid`, `last_seen_ts` |
-| `binary_sensor.vatsim_atc_coverage` | `on` = controlled | `controller_callsign`, `frequency`, `polygon_id`, `mode` (`CTR`, `APP`, `DEP`), `last_change_reason`, `boundary_geojson` |
-| `sensor.vatsim_next_sector` | `differs`, `matches`, `skipped_low_speed`, `skipped_unstable_heading`, `skipped_insufficient_history` | `result_kind` (`different_sector`, `projected_uncontrolled`, `same_sector`, `still_uncontrolled`, or a skip state), `controller_callsign`, `frequency`, `eta_minutes`, `eta_distance_nm`, `eta_text`, `projection_note`, `next_boundary_geojson` |
-| `sensor.vatsim_flight_route` | `ok`, `no_flight_plan`, `navdata_unavailable`, `unresolved` | `departure`, `arrival`, `raw_route`, `route_geojson`, `resolved_waypoint_count`, `unresolved_token_count`, `departure_airport_resolved`, `arrival_airport_resolved` |
-| `sensor.vatsim_destination` | `departure`, `in_range`, `out_of_range`, `selected`, `at_other_airport`, `no_destination`, `position_unknown`, `not_connected` | `airport`, `role`, `distance_nm`, `range_nm`, `atis_online`, `atis_callsign`, `atis_code`, `atis_frequency`, `atis_text`, `atis_last_updated`, `session` |
-| `sensor.vatsim_online_atc_boundaries` | number of boundaries drawn | `controller_count`, `all_boundaries_geojson` |
-| `sensor.vatsim_session_track` | `active`, `empty` | `point_count`, `session_started_at`, `points`, `track_geojson` |
-| `device_tracker.vatsim_aircraft` | `not_home` | `latitude`, `longitude`, `callsign`, `cid`, `altitude_ft`, `groundspeed_kt`, `heading_deg`, `last_seen_ts`, `session_active` |
-
-The package adds `binary_sensor.vatsim_aircraft_has_position`, which always exists and is `on` once the aircraft has a position. Use it for card visibility.
-
-**Keep the large attributes out of the recorder.** `points` and the GeoJSON attributes are large and change constantly:
-
-```yaml
-recorder:
-  exclude:
-    entities:
-      - sensor.vatsim_session_track
-      - sensor.vatsim_online_atc_boundaries
-      - sensor.vatsim_flight_route
-      - sensor.vatsim_next_sector
-      - binary_sensor.vatsim_atc_coverage
-```
-
-Excluding the last two also removes their history. Leave them in if you want it.
-
-**Feed health attributes.** `last_success_ts`, `consecutive_failures`, `feed_age_seconds`, `timestamp_status` (`ok`, `unknown`, `missing_or_unparseable`, `processing_error`), `geometry_status` (`ready`, `loading`), `geometry_age_seconds`, `last_geometry_refresh_error`, `app_dep_status`, `simaware_load_issue_count`, `navdata_status`, `navdata_cycle`, `navdata_valid_until`, `navdata_load_issue_count`, `last_navdata_refresh_error`, `nat_track_status`, `nat_track_count`, `nat_tracks_in_force`, `nat_track_valid_until`, `last_nat_refresh_error`, `publish_unverified`. Counts that are zero and errors that are unset are absent, so read them with `| int(0)` or test for `none`.
-
-`navdata_status` and `app_dep_status` take `disabled`, `configured_but_unloaded`, `configured_but_empty`, `active`; `navdata_status` also takes `expired` (past the AIRAC validity date; the data is still used).
-
-`nat_track_status` takes:
-- `disabled`: no `navdata_path`, or `nat_tracks_url` blank
-- `unloaded`: not fetched yet
-- `no_tracks_in_force`: normal between the daily westbound and eastbound track windows
-- `expired`: deliberately draws nothing
-- `active`
+On a new install the "aircraft position missing" watchdog reports before your first flight, because there is no saved position yet. It clears when you first connect.
 
 ---
 
 ## Troubleshooting
 
-**Routes do not draw, or `sensor.vatsim_flight_route` is `navdata_unavailable`.** Check `navdata_status` and `last_navdata_refresh_error` on `sensor.vatsim_feed_health`, then the AppDaemon log. The usual cause is `navdata_path` written as `/config/...` instead of `/homeassistant/...`.
+- **Feed health is not `healthy`.** Open the entity: the attributes name what is wrong and carry the last error text.
+- **No route line.** `navdata_status` on the feed health sensor says whether navigation data is `active`, `disabled` (no folder set), `configured_but_empty` (the folder holds none of the four files) or `expired`.
+- **An approach controller alone reads as uncontrolled.** `app_dep_status` is not `active`: no SimAware file is set, or it could not be read.
+- **Logs.** Settings > System > Logs, search `vatsim_atc`. For detail, set the integration's log level to debug from its three-dot menu.
 
-**`unresolved_token_count` is high on a route that looks normal.** One or two is expected: SID and STAR names count as unresolved. More than that usually means files from a different simulator's format, or an AIRAC cycle that predates the route.
+---
 
-**A waypoint lands on the wrong continent.** Check that the files are X-Plane 12 format and that `navdata_load_issue_count` is absent or zero.
+## Data and privacy
 
-**The NAT track is missing from an oceanic route.** Check `nat_track_status`. `no_tracks_in_force` and `expired` are both deliberate no-draw states.
-
-**An approach controller is online but coverage reads uncontrolled.** `app_dep_status` must be `active`, which needs `simaware_boundaries_path`. Above `app_dep_altitude_gate_ft` approach sectors are ignored by design.
-
-**Entities are missing after a Home Assistant restart.** Expected until the app's next poll. If they do not come back, check that the AppDaemon add-on is running. The "tracker not publishing" watchdog reports this after 10 minutes.
-
-**I get no spoken alerts.** Check the alert mode, the per-alert toggles, at least one speaker toggle, the speaker map and TTS entity in `vatsim_user.yaml`, and the mute gate if you set one.
+- **What it fetches**, about every 18 seconds while Home Assistant runs: the public VATSIM data feed. Periodically: the VAT-Spy boundary files and natTrak. On demand: a METAR from VATSIM, falling back to aviationweather.gov. Each request carries a User-Agent naming this project. Nothing is sent anywhere else.
+- **What it stores**: your CID in the integration's configuration, and your aircraft's last position, callsign and CID in a file under `.storage`. The aircraft tracker's state, including callsign and position, goes into your Home Assistant database like any other entity.
+- **Your CID and callsign appear in entity attributes.** Remove them before sharing a screenshot. On VATSIM a callsign, a date and a route are enough to identify the account that flew it.
+- VAT-Spy and SimAware boundaries are CC BY-SA 4.0. If you publish a map drawn from them, credit those projects. See `THIRD_PARTY_NOTICES.md`.
 
 ---
 
 ## Development
 
+The tracking logic is in `custom_components/vatsim_atc/core/engine.py` and has no Home Assistant imports. `host.py` runs it on Home Assistant's event loop: the engine's work happens on one worker thread and never on the loop.
+
 ```
-pip install requests geopy shapely pyyaml
-python -m unittest discover -s tests -v      # 28 tests, synthetic navdata, no network
-python tools/check_docs.py                   # README names must exist in the code
-python tools/pii_scan.py .                   # personal-data scan before a release
-python tools/dryrun_compare.py OLD.py NEW.py --apps-yaml apps.yaml --sample-online
-python tools/build_simaware.py CLONE OUT     # merge SimAware boundaries into one file
+python -B -m unittest discover -s tests
 ```
 
-`dryrun_compare.py` fetches the public feeds once and shows whether two versions of the app would publish the same states. It writes nothing to Home Assistant.
+needs nothing installed. The tests for the Home Assistant side use stand-ins (`tests/ha_stubs.py`), which check the integration against itself, not against Home Assistant.
 
 ---
 
-## Privacy
+## Coming from version 1 (the AppDaemon app)
 
-The app reads public VATSIM network data, the public VAT-Spy boundary files, and your local files. It sends nothing about you anywhere: its five outbound requests are plain downloads, identified only by a `User-Agent` naming this project and its version. Your CID stays in your own `apps.yaml`.
+Version 1 is still available on the `appdaemon` branch and as the `v1.0.0-rc2` pre-release. It is no longer developed.
 
-Three things on your own system do hold your CID, callsign and position: the entity attributes, the AppDaemon log, and the file `vatsim_last_aircraft.json` next to the app (path configurable with `last_aircraft_path`). Keep them out of screenshots and bug reports.
+Version 2 needs no AppDaemon, no Python packages and no `apps.yaml`. To move over:
 
-## License and credits
+1. Install and set up the integration as above. It runs beside the AppDaemon app; the two do not interfere.
+2. The entity ids changed: `sensor.vatsim_feed_health` is now `sensor.vatsim_tracker_feed_health`, and likewise for the other eight. `input_text.vatsim_atis_airport` is now `text.vatsim_tracker_atis_airport`. Replace `packages/vatsim.yaml` and the dashboard with the files from this version; your `vatsim_user.yaml` carries over unchanged.
+3. Paths change from the AppDaemon container's view (`/homeassistant/vatsim/navdata`) to Home Assistant's (`/config/vatsim/navdata`).
+4. Attributes now have real types. A template written for the old quirk, where `true` arrived as a string and `false` or `0` was missing, should be checked.
+5. Once a flight looks right, stop the AppDaemon add-on.
 
-MIT. See `LICENSE`. Copyright (c) 2026 SavBuilds.
+---
 
-Not affiliated with or endorsed by VATSIM, Navigraph, Laminar Research or SimAware. Network data comes from VATSIM. Boundaries come from the VAT-Spy Client Data Update Project and the SimAware TRACON Project (both CC BY-SA 4.0). NAT tracks come from natTrak. See `THIRD_PARTY_NOTICES.md`.
+## Licence
+
+MIT, see `LICENSE`. Not affiliated with or endorsed by VATSIM, Navigraph, Laminar Research or SimAware.

@@ -1,3 +1,6 @@
+# VATSIM ATC Tracker dashboard. Paste into a new dashboard's raw configuration editor.
+# Needs three cards from the Marketplace or HACS: button-card, Mushroom and map-card.
+# Entity ids are the integration's defaults; change them here if you renamed yours.
 button_card_templates:
   vatsim_speaker:
     section_mode: true
@@ -7,869 +10,540 @@ button_card_templates:
       action: toggle
     hold_action:
       action: more-info
-    tooltip: >-
-      On: VATSIM announcements are spoken on this speaker (when the alert mode
-      includes Speaker). Hold for history.
+    tooltip: 'On: VATSIM announcements are spoken on this speaker (when the alert mode includes Speaker). Hold for history.'
     styles:
       card:
-        - padding: 6px 4px
+      - padding: 6px 4px
       icon:
-        - color: var(--secondary-text-color)
+      - color: var(--secondary-text-color)
       name:
-        - font-size: 0.8rem
-        - font-weight: '500'
-        - color: var(--primary-text-color)
+      - font-size: 0.8rem
+      - font-weight: '500'
+      - color: var(--primary-text-color)
     state:
-      - value: 'on'
-        styles:
-          card:
-            - background-color: var(--primary-color)
-          icon:
-            - color: 'var(--text-primary-color, #ffffff)'
-          name:
-            - color: 'var(--text-primary-color, #ffffff)'
+    - value: 'on'
+      styles:
+        card:
+        - background-color: var(--primary-color)
+        icon:
+        - color: 'var(--text-primary-color, #ffffff)'
+        name:
+        - color: 'var(--text-primary-color, #ffffff)'
 title: VATSIM
 views:
-  - title: VATSIM
-    path: vatsim
-    icon: mdi:airplane
-    type: sections
-    max_columns: 3
-    sections:
-      - type: grid
-        cards:
-          - type: heading
-            heading: Flight Status
-            heading_style: title
-            icon: mdi:radio-tower
-          - type: custom:mushroom-template-card
-            entity: sensor.vatsim_feed_health
-            primary: >-
-              {% set h = 'sensor.vatsim_feed_health' %}{% if
-              states.sensor.vatsim_feed_health is none %}Tracker not running{%
-              else %}{% set ns = namespace(n=0) %}{% if states(h) != 'healthy'
-              %}{% set ns.n = ns.n + 1 %}{% endif %}{% if
-              (state_attr(h,'timestamp_status') or 'ok') != 'ok' %}{% set ns.n =
-              ns.n + 1 %}{% endif %}{% if state_attr(h,'geometry_status') !=
-              'ready' %}{% set ns.n = ns.n + 1 %}{% endif %}{% if
-              state_attr(h,'navdata_status') in
-              ['configured_but_unloaded','configured_but_empty','expired'] %}{%
-              set ns.n = ns.n + 1 %}{% endif %}{% if
-              state_attr(h,'nat_track_status') in ['expired','unloaded'] %}{%
-              set ns.n = ns.n + 1 %}{% endif %}{% if
-              state_attr(h,'publish_unverified') %}{% set ns.n = ns.n + 1 %}{%
-              endif %}{{ 'Data OK' if ns.n == 0 else ns.n ~ (' data problem' if
-              ns.n == 1 else ' data problems') }}{% endif %}
-            secondary: >-
-              {% set h = 'sensor.vatsim_feed_health' %}{% if
-              states.sensor.vatsim_feed_health is none %}Check the AppDaemon
-              log{% else %}{% set ns = namespace(l=[]) %}{% set last =
-              state_attr(h,'last_success_ts') | float(0) %}{% if states(h) !=
-              'healthy' %}{% set ns.l = ns.l + ['Feed ' ~ states(h) ~ (', last
-              good fetch ' ~ ((now().timestamp() - last) / 60) | round(0) | int
-              ~ ' min ago' if last > 0 else '')] %}{% endif %}{% set ts =
-              state_attr(h,'timestamp_status') or 'ok' %}{% if ts != 'ok' %}{%
-              set ns.l = ns.l + ['Feed ' ~ ts | replace('_',' ')] %}{% endif
-              %}{% if state_attr(h,'geometry_status') != 'ready' %}{% set ns.l =
-              ns.l + ['Boundaries loading: coverage reads Uncontrolled until
-              ready'] %}{% endif %}{% set nd = state_attr(h,'navdata_status')
-              %}{% if nd in ['configured_but_unloaded','configured_but_empty']
-              %}{% set ns.l = ns.l + ['Navdata ' ~ nd |
-              replace('configured_but_','') ~ ': no route line'] %}{% elif nd ==
-              'expired' %}{% set ns.l = ns.l + ['Navdata AIRAC ' ~
-              (state_attr(h,'navdata_cycle') or '?') ~ ' expired ' ~
-              (state_attr(h,'navdata_valid_until') or '') ~ ': route line may
-              use retired fixes'] %}{% endif %}{% set nat =
-              state_attr(h,'nat_track_status') %}{% if nat in
-              ['expired','unloaded'] %}{% set ns.l = ns.l + ['NAT tracks ' ~ nat
-              ~ ': oceanic route line may be wrong'] %}{% endif %}{% if
-              state_attr(h,'publish_unverified') %}{% set ns.l = ns.l + ['HA not
-              holding ' ~ state_attr(h,'publish_unverified')] %}{% endif %}{% if
-              state_attr(h,'app_dep_status') != 'active' %}{% set ns.l = ns.l +
-              ['Approach and departure boundaries off: an APP or DEP controller
-              alone reads Uncontrolled'] %}{% endif %}{{ ns.l | join('. ') if
-              ns.l else 'Feed, boundaries, navdata and NAT tracks current' }}{%
-              endif %}
-            icon: mdi:shield-check-outline
-            color: >-
-              {% set h = 'sensor.vatsim_feed_health' %}{% if
-              states.sensor.vatsim_feed_health is none or states(h) not in
-              ['healthy','degraded'] %}red{% elif states(h) == 'degraded' or
-              (state_attr(h,'timestamp_status') or 'ok') != 'ok' or
-              state_attr(h,'geometry_status') != 'ready' or
-              state_attr(h,'publish_unverified') or
-              state_attr(h,'navdata_status') in
-              ['configured_but_unloaded','configured_but_empty','expired'] or
-              state_attr(h,'nat_track_status') in ['expired','unloaded']
-              %}amber{% else %}green{% endif %}
-            multiline_secondary: true
-            grid_options:
-              columns: full
-            tap_action:
-              action: more-info
-            hold_action:
-              action: none
-          - type: custom:mushroom-template-card
-            primary: Pilot
-            secondary: >-
-              {% if not has_value('binary_sensor.vatsim_pilot_connected') %}{{
-              'Tracker not running' if states.sensor.vatsim_feed_health is none
-              else 'Feed unavailable' }}{% else %}{% if
-              is_state('binary_sensor.vatsim_pilot_connected','on')
-              %}Connected{% else %}Disconnected{% endif %}{% endif %}
-            icon: mdi:airplane
-            grid_options:
-              columns: 6
-            color: >-
-              {% if is_state('binary_sensor.vatsim_pilot_connected','on')
-              %}green{% else %}grey{% endif %}
-            multiline_secondary: true
-            tap_action:
-              action: none
-            hold_action:
-              action: none
-          - type: custom:mushroom-template-card
-            primary: ATC Coverage
-            secondary: >-
-              {% if not has_value('binary_sensor.vatsim_atc_coverage') %}{{
-              'Tracker not running' if states.sensor.vatsim_feed_health is none
-              else 'Feed unavailable' }}{% else %}{% if
-              is_state('binary_sensor.vatsim_atc_coverage','on') %}Controlled{%
-              else %}Uncontrolled{% endif %}{% endif %}
-            icon: mdi:radio-tower
-            grid_options:
-              columns: 6
-            color: >-
-              {% if is_state('binary_sensor.vatsim_atc_coverage','on') %}green{%
-              else %}grey{% endif %}
-            multiline_secondary: true
-            tap_action:
-              action: none
-            hold_action:
-              action: none
-          - type: heading
-            heading: Radios
-            heading_style: subtitle
-            icon: mdi:radio-handheld
-          - type: custom:button-card
-            entity: binary_sensor.vatsim_atc_coverage
-            section_mode: true
-            grid_options:
-              columns: full
-              rows: 2
-            show_name: false
-            show_icon: false
-            show_state: false
-            tap_action:
-              action: more-info
-            hold_action:
-              action: none
-            tooltip: >-
-              Left: the controller covering you now (UNICOM 122.800 if none).
-              Right: the controller at the position projected ahead on your
-              current heading and groundspeed.
-            extra_styles: >-
-              .lbl { font-size: 0.7rem; color: var(--secondary-text-color);
-              letter-spacing: 1px; font-weight: 600; }
-
-              .val { font-variant-numeric: tabular-nums; font-size: 1.5rem;
-              font-weight: 600; color: var(--primary-text-color); line-height:
-              1.25; }
-
-              .big { font-variant-numeric: tabular-nums; font-size: 1.6rem;
-              font-weight: 600; line-height: 1.15; margin: 2px 0; }
-
-              .u { font-size: 0.75rem; color: var(--secondary-text-color);
-              margin-left: 2px; }
-
-              .sub { font-size: 0.85rem; color: var(--primary-text-color);
-              white-space: normal; }
-
-              .dim { font-size: 0.75rem; color: var(--secondary-text-color); }
-
-              .badge { border: 1px solid; border-radius: 6px; padding: 3px 8px;
-              text-align: right; }
-
-              .blbl { font-size: 0.7rem; font-weight: 600; letter-spacing:
-              0.5px; line-height: 1.1; }
-
-              .bfreq { font-variant-numeric: tabular-nums; font-size: 1.1rem;
-              font-weight: 600; color: var(--primary-text-color); line-height:
-              1.2; }
-            styles:
-              card:
-                - padding: 12px 14px
-              grid:
-                - grid-template-areas: '''act arr nxt'''
-                - grid-template-columns: 1fr 26px 1fr
-                - align-items: center
-              custom_fields:
-                act:
-                  - text-align: left
-                  - justify-self: stretch
-                arr:
-                  - justify-self: center
-                nxt:
-                  - text-align: right
-                  - justify-self: stretch
-            custom_fields:
-              act: >-
-                [[[
-
-                const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':
-                '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'":
-                '&#39;'}[c]));
-
-                const pc = states['binary_sensor.vatsim_pilot_connected']; const
-                on = !!pc && pc.state === 'on';
-
-                const fh = states['sensor.vatsim_feed_health'];
-
-                const cov = entity;
-
-                let f = '---.---', c = 'var(--secondary-text-color)', s;
-
-                if (!fh) s = 'Tracker not running';
-
-                else if (!cov || !['on', 'off'].includes(cov.state)) s = 'Feed
-                unavailable';
-
-                else if (!on) s = 'Not connected';
-
-                else if (cov.state === 'on') {
-                  const a = cov.attributes;
-                  f = a.frequency ? esc(a.frequency) : '---.---'; c = 'var(--green-color, #4caf50)';
-                  s = esc(a.controller_callsign || 'Controller online');
-                } else { f = '122.800'; c = 'var(--blue-grey-color, #607d8b)'; s
-                = 'UNICOM, no ATC covers you'; }
-
-                return `<div class="lbl">ACTIVE COMM</div><div class="big"
-                style="color: ${c}">${f}</div><div class="sub">${s}</div>`;
-
-                ]]]
-              arr: >-
-                [[[
-
-                const ns = states['sensor.vatsim_next_sector'];
-
-                const k = ns ? ns.attributes.result_kind : null;
-
-                const c = k === 'different_sector' ? 'var(--amber-color,
-                #ffc107)' : (k === 'projected_uncontrolled' ?
-                'var(--deep-orange-color, #ff6f22)' : 'var(--divider-color)');
-
-                return `<ha-icon icon="mdi:chevron-double-right" style="color:
-                ${c}; --mdc-icon-size: 22px;"></ha-icon>`;
-
-                ]]]
-              nxt: >-
-                [[[
-
-                const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':
-                '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'":
-                '&#39;'}[c]));
-
-                const pc = states['binary_sensor.vatsim_pilot_connected']; const
-                on = !!pc && pc.state === 'on';
-
-                const ns = states['sensor.vatsim_next_sector'];
-
-                const a = ns ? ns.attributes : {};
-
-                const k = a.result_kind;
-
-                const eta = a.eta_text ? esc(a.eta_text) : '';
-
-                const nm = typeof a.eta_distance_nm === 'number' ?
-                Math.round(a.eta_distance_nm) + ' nm' : '';
-
-                const when = [eta, nm].filter(Boolean).join(', ');
-
-                const paused = {skipped_low_speed: 'Paused: groundspeed too
-                low', skipped_unstable_heading: 'Paused: heading changing',
-                                skipped_insufficient_history: 'Gathering heading data'};
-                let f = '---.---', c = 'var(--secondary-text-color)', s;
-
-                if (!ns || ['unknown', 'unavailable'].includes(ns.state)) s =
-                states['sensor.vatsim_feed_health'] ? 'No lookahead data' :
-                'Tracker not running';
-
-                else if (!on) s = 'Not connected';
-
-                else if (k === 'different_sector' && a.next_controller_callsign)
-                {
-                  f = a.next_frequency ? esc(a.next_frequency) : '---.---'; c = 'var(--amber-color, #ffc107)';
-                  s = esc(a.next_controller_callsign) + (when ? ` <span class="dim">${when}</span>` : '');
-                } else if (k === 'projected_uncontrolled') {
-                  f = '122.800'; c = 'var(--deep-orange-color, #ff6f22)'; s = 'Leaving coverage' + (when ? ` <span class="dim">${when}</span>` : '');
-                } else if (k === 'same_sector') s = 'No handoff ahead';
-
-                else if (k && k.startsWith('skipped_')) s = paused[k] ||
-                'Lookahead paused';
-
-                else s = 'Nothing ahead';
-
-                const note = {altitude_gate: 'Approach sectors excluded in
-                cruise', ambiguous_trend: 'Climb or descent
-                unclear'}[a.projection_note];
-
-                return `<div class="lbl">NEXT SECTOR</div><div class="big"
-                style="color: ${c}">${f}</div>`
-                  + `<div class="sub">${s}</div>` + (on && note ? `<div class="dim">${note}</div>` : '');
-                ]]]
-          - type: heading
-            heading: ATIS
-            heading_style: subtitle
-            icon: mdi:information-outline
-          - type: entities
-            show_header_toggle: false
-            entities:
-              - entity: input_text.vatsim_atis_airport
-                name: ATIS airport (blank = automatic)
-          - type: custom:button-card
-            entity: sensor.vatsim_destination
-            section_mode: true
-            grid_options:
-              columns: full
-              rows: 3
-            show_name: false
-            show_icon: false
-            show_state: false
-            tap_action:
-              action: more-info
-            hold_action:
-              action: none
-            tooltip: >-
-              On the ground at your filed departure: its ATIS (departure ATIS
-              first). Once airborne: your arrival, once inside the ATIS range
-              (100 nm unless you set destination_range_nm). A typed-in ATIS
-              airport overrides both, connected or not.
-              Tap for the full text.
-            extra_styles: >-
-              .lbl { font-size: 0.7rem; color: var(--secondary-text-color);
-              letter-spacing: 1px; font-weight: 600; }
-
-              .val { font-variant-numeric: tabular-nums; font-size: 1.5rem;
-              font-weight: 600; color: var(--primary-text-color); line-height:
-              1.25; }
-
-              .big { font-variant-numeric: tabular-nums; font-size: 1.6rem;
-              font-weight: 600; line-height: 1.15; margin: 2px 0; }
-
-              .u { font-size: 0.75rem; color: var(--secondary-text-color);
-              margin-left: 2px; }
-
-              .sub { font-size: 0.85rem; color: var(--primary-text-color);
-              white-space: normal; }
-
-              .dim { font-size: 0.75rem; color: var(--secondary-text-color); }
-
-              .badge { border: 1px solid; border-radius: 6px; padding: 3px 8px;
-              text-align: right; }
-
-              .blbl { font-size: 0.7rem; font-weight: 600; letter-spacing:
-              0.5px; line-height: 1.1; }
-
-              .bfreq { font-variant-numeric: tabular-nums; font-size: 1.1rem;
-              font-weight: 600; color: var(--primary-text-color); line-height:
-              1.2; }
-
-              .txt { font-size: 0.8rem; color: var(--secondary-text-color);
-              white-space: normal; line-height: 1.35; display: -webkit-box;
-              -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow:
-              hidden; }
-            styles:
-              card:
-                - padding: 12px 14px
-              grid:
-                - grid-template-areas: '''apt atis'' ''txt txt'''
-                - grid-template-columns: 1fr 1fr
-                - grid-template-rows: auto 1fr
-                - row-gap: 8px
-                - align-items: start
-              custom_fields:
-                apt:
-                  - text-align: left
-                  - justify-self: stretch
-                atis:
-                  - text-align: right
-                  - justify-self: stretch
-                txt:
-                  - text-align: left
-                  - justify-self: stretch
-            custom_fields:
-              apt: >-
-                [[[
-
-                const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':
-                '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'":
-                '&#39;'}[c]));
-
-                const a = entity ? entity.attributes : {};
-
-                const lbl = {departure: 'DEPARTURE', arrival: 'DESTINATION',
-                selected: 'SELECTED'}[a.role] || 'AIRPORT';
-
-                // State "departure" means on the ground within departure_near_nm
-                of the filed departure.
-
-                const near = !!entity && entity.state === 'departure';
-
-                const d = near ? 'At the field' : (typeof a.distance_nm ===
-                'number' ? Math.round(a.distance_nm) + ' nm' : '---');
-
-                return `<div class="lbl">${lbl}</div><div
-                class="big">${a.airport ? esc(a.airport) : '----'}</div><div
-                class="sub">${d}</div>`;
-
-                ]]]
-              atis: >-
-                [[[
-
-                const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':
-                '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'":
-                '&#39;'}[c]));
-
-                const a = entity ? entity.attributes : {};
-
-                if (!a.atis_online) return `<div class="lbl">ATIS</div><div
-                class="big" style="color:
-                var(--secondary-text-color)">-</div><div class="sub">No ATIS
-                online</div>`;
-
-                const code = a.atis_code ?
-                esc(String(a.atis_code).toUpperCase()) : '?';
-
-                const f = a.atis_frequency ? esc(a.atis_frequency) : '';
-
-                return `<div class="lbl">ATIS</div><div class="big"
-                style="color: var(--amber-color, #ffc107)">${code}</div><div
-                class="sub">${f}</div>`;
-
-                ]]]
-              txt: >-
-                [[[
-
-                const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':
-                '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'":
-                '&#39;'}[c]));
-
-                const a = entity ? entity.attributes : {};
-
-                return a.atis_online && a.atis_text ? `<div
-                class="txt">${esc(a.atis_text)}</div>` : '';
-
-                ]]]
-            visibility:
-              - condition: state
-                entity: sensor.vatsim_destination
-                state:
-                  - departure
-                  - in_range
-                  - selected
-      - type: grid
-        column_span: 2
-        cards:
-          - type: heading
-            heading: Telemetry
-            heading_style: title
-            icon: mdi:gauge
-          - type: custom:button-card
-            entity: device_tracker.vatsim_aircraft
-            section_mode: true
-            grid_options:
-              columns: full
-              rows: 2
-            show_name: false
-            show_icon: false
-            show_state: false
-            tap_action:
-              action: more-info
-            hold_action:
-              action: none
-            tooltip: >-
-              Latest position report from the VATSIM feed. Tap for the aircraft
-              history.
-            extra_styles: >-
-              .lbl { font-size: 0.7rem; color: var(--secondary-text-color);
-              letter-spacing: 1px; font-weight: 600; }
-
-              .val { font-variant-numeric: tabular-nums; font-size: 1.5rem;
-              font-weight: 600; color: var(--primary-text-color); line-height:
-              1.25; }
-
-              .big { font-variant-numeric: tabular-nums; font-size: 1.6rem;
-              font-weight: 600; line-height: 1.15; margin: 2px 0; }
-
-              .u { font-size: 0.75rem; color: var(--secondary-text-color);
-              margin-left: 2px; }
-
-              .sub { font-size: 0.85rem; color: var(--primary-text-color);
-              white-space: normal; }
-
-              .dim { font-size: 0.75rem; color: var(--secondary-text-color); }
-
-              .badge { border: 1px solid; border-radius: 6px; padding: 3px 8px;
-              text-align: right; }
-
-              .blbl { font-size: 0.7rem; font-weight: 600; letter-spacing:
-              0.5px; line-height: 1.1; }
-
-              .bfreq { font-variant-numeric: tabular-nums; font-size: 1.1rem;
-              font-weight: 600; color: var(--primary-text-color); line-height:
-              1.2; }
-            styles:
-              card:
-                - padding: 12px 14px
-              grid:
-                - grid-template-areas: '''cs alt gs hdg st'''
-                - grid-template-columns: 1.3fr 1fr 1fr 1fr 1.4fr
-                - align-items: center
-              custom_fields:
-                cs:
-                  - justify-self: stretch
-                  - text-align: left
-                  - border-right: 1px solid var(--divider-color)
-                  - padding-right: 10px
-                alt:
-                  - text-align: center
-                gs:
-                  - text-align: center
-                hdg:
-                  - text-align: center
-                  - border-right: 1px solid var(--divider-color)
-                  - padding-right: 10px
-                st:
-                  - justify-self: end
-                  - padding-left: 10px
-            custom_fields:
-              cs: >-
-                [[[
-
-                const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':
-                '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'":
-                '&#39;'}[c]));
-
-                const pc = states['binary_sensor.vatsim_pilot_connected']; const
-                on = !!pc && pc.state === 'on';
-
-                const a = entity ? entity.attributes : {};
-
-                const cs = a.callsign ? esc(a.callsign) : '------';
-
-                return `<div class="lbl">${on ? 'CALLSIGN' : 'LAST
-                FLIGHT'}</div>`
-                  + `<div class="val" style="color: ${on ? 'var(--green-color, #4caf50)' : 'var(--secondary-text-color)'}">${cs}</div>`;
-                ]]]
-              alt: >-
-                [[[
-
-                const pc = states['binary_sensor.vatsim_pilot_connected']; const
-                on = !!pc && pc.state === 'on';
-
-                const num = (x) => typeof x === 'number' && isFinite(x);
-
-                const a = entity ? entity.attributes : {};
-
-                const r = a.altitude_ft;
-
-                // AppDaemon drops 0, so with a position published a missing
-                value is 0.
-
-                const v = r === undefined || r === null ? (on && typeof
-                a.latitude === 'number' ? 0 : undefined) : r;
-
-                const t = on && num(v) ? Math.round(v).toLocaleString('en-US') :
-                '---';
-
-                return `<div class="lbl">ALTITUDE</div><div
-                class="val">${t}<span class="u">FT</span></div>`;
-
-                ]]]
-              gs: >-
-                [[[
-
-                const pc = states['binary_sensor.vatsim_pilot_connected']; const
-                on = !!pc && pc.state === 'on';
-
-                const num = (x) => typeof x === 'number' && isFinite(x);
-
-                const a = entity ? entity.attributes : {};
-
-                const r = a.groundspeed_kt;
-
-                // AppDaemon drops 0, so with a position published a missing
-                value is 0.
-
-                const v = r === undefined || r === null ? (on && typeof
-                a.latitude === 'number' ? 0 : undefined) : r;
-
-                const t = on && num(v) ? String(Math.round(v)) : '---';
-
-                return `<div class="lbl">GS</div><div class="val">${t}<span
-                class="u">KT</span></div>`;
-
-                ]]]
-              hdg: >-
-                [[[
-
-                const pc = states['binary_sensor.vatsim_pilot_connected']; const
-                on = !!pc && pc.state === 'on';
-
-                const num = (x) => typeof x === 'number' && isFinite(x);
-
-                const a = entity ? entity.attributes : {};
-
-                const r = a.heading_deg;
-
-                // AppDaemon drops 0, so with a position published a missing
-                value is 0.
-
-                const v = r === undefined || r === null ? (on && typeof
-                a.latitude === 'number' ? 0 : undefined) : r;
-
-                // 360 reads as 360, not 000, matching aviation convention.
-
-                const h = num(v) ? (Math.round(v) % 360 || 360) : null;
-
-                const t = on && h !== null ? String(h).padStart(3, '0') +
-                '&deg;' : '---';
-
-                return `<div class="lbl">HDG</div><div class="val">${t}</div>`;
-
-                ]]]
-              st: >-
-                [[[
-
-                const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':
-                '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'":
-                '&#39;'}[c]));
-
-                const pc = states['binary_sensor.vatsim_pilot_connected']; const
-                on = !!pc && pc.state === 'on';
-
-                const fh = states['sensor.vatsim_feed_health'];
-
-                const cov = states['binary_sensor.vatsim_atc_coverage'];
-
-                let t, f, c;
-
-                if (!fh) { t = 'TRACKER OFF'; f = '---.---'; c =
-                'var(--red-color, #f44336)'; }
-
-                else if (!cov || !['on', 'off'].includes(cov.state)) { t = 'NO
-                ATC DATA'; f = '---.---'; c = 'var(--secondary-text-color)'; }
-
-                else if (!on) { t = 'OFFLINE'; f = '---.---'; c =
-                'var(--secondary-text-color)'; }
-
-                else if (cov.state === 'on') { t = 'ATC ONLINE'; f =
-                cov.attributes.frequency ? esc(cov.attributes.frequency) :
-                '---.---'; c = 'var(--green-color, #4caf50)'; }
-
-                else { t = 'UNICOM'; f = '122.800'; c = 'var(--blue-grey-color,
-                #607d8b)'; }
-
-                return `<div class="badge" style="border-color: ${c};
-                background: color-mix(in srgb, ${c} 15%, transparent)">`
-                  + `<div class="blbl" style="color: ${c}">${t}</div><div class="bfreq">${f}</div></div>`;
-                ]]]
-          - type: custom:map-card
-            title: Session Map
-            grid_options:
-              columns: full
-            focus_entity: device_tracker.vatsim_aircraft
-            focus_follow: contains
-            zoom: 7
-            card_size: 14
-            entities:
-              - entity: device_tracker.vatsim_aircraft
-                display: icon
-                icon: mdi:airplane
-                color: '#1565c0'
-                size: 24
-              - entity: sensor.vatsim_session_track
-                focus_on_fit: false
-                fixed_x: -98.5
-                fixed_y: 39.8
-                geojson:
-                  attribute: track_geojson
-                  color: '#1565c0'
-                  weight: 3
-                  opacity: 0.9
-                  hide_marker: true
-              - entity: sensor.vatsim_flight_route
-                focus_on_fit: false
-                fixed_x: -98.5
-                fixed_y: 39.8
-                geojson:
-                  attribute: route_geojson
-                  color: '#8e24aa'
-                  weight: 2
-                  opacity: 0.85
-                  dash_array: 6, 6
-                  hide_marker: true
-              - entity: sensor.vatsim_online_atc_boundaries
-                focus_on_fit: false
-                fixed_x: -98.5
-                fixed_y: 39.8
-                geojson:
-                  attribute: all_boundaries_geojson
-                  color: '#5c6bc0'
-                  weight: 2
-                  opacity: 0.9
-                  fill_opacity: 0.06
-                  hide_marker: true
-              - entity: binary_sensor.vatsim_atc_coverage
-                focus_on_fit: false
-                fixed_x: -98.5
-                fixed_y: 39.8
-                geojson:
-                  attribute: boundary_geojson
-                  color: '#2e7d32'
-                  weight: 2
-                  opacity: 0.8
-                  fill_opacity: 0.12
-                  hide_marker: true
-              - entity: sensor.vatsim_next_sector
-                focus_on_fit: false
-                fixed_x: -98.5
-                fixed_y: 39.8
-                geojson:
-                  attribute: next_boundary_geojson
-                  color: '#f9a825'
-                  weight: 2
-                  opacity: 0.7
-                  fill_opacity: 0.08
-                  hide_marker: true
-            visibility:
-              - condition: state
-                entity: binary_sensor.vatsim_aircraft_has_position
-                state: 'on'
-            theme_mode: dark
-          - type: markdown
-            text_only: true
-            content: >-
-              <font color="#1565c0">&#9992;</font> You and your track &nbsp;
-              <font color="#2e7d32">&#9632;</font> Your controller &nbsp; <font
-              color="#f9a825">&#9632;</font> Next controller &nbsp; <font
-              color="#5c6bc0">&#9633;</font> Other online sectors &nbsp; <font
-              color="#8e24aa">- - -</font> Filed route
-            grid_options:
-              columns: full
-            visibility:
-              - condition: state
-                entity: binary_sensor.vatsim_aircraft_has_position
-                state: 'on'
-          - type: markdown
-            title: Session Map
-            grid_options:
-              columns: full
-            content: >-
-              {% if states.sensor.vatsim_feed_health is none %}The map appears
-              once the tracker is running and has your aircraft position. The
-              tracker is not running yet: check the AppDaemon log.{% elif
-              states.device_tracker.vatsim_aircraft is none %}The map appears
-              the first time you connect to VATSIM. After that it keeps your
-              last position between flights.{% else %}The aircraft has no saved
-              position, so the map is hidden. If you have flown before, the
-              restore after a restart failed: check the AppDaemon log for the
-              save file.{% endif %}
-            visibility:
-              - condition: state
-                entity: binary_sensor.vatsim_aircraft_has_position
-                state: 'off'
-          - type: heading
-            heading: Flight Plan
-            heading_style: title
-            icon: mdi:map-marker-path
-          - type: custom:mushroom-template-card
-            primary: >-
-              {% set d = state_attr('sensor.vatsim_flight_route','departure')
-              %}{% set a = state_attr('sensor.vatsim_flight_route','arrival')
-              %}{% if d and a %}{{ d }} to {{ a }}{% else %}No flight plan
-              filed{% endif %}
-            secondary: >-
-              {% set s = states('sensor.vatsim_flight_route') %}{% set r =
-              state_attr('sensor.vatsim_flight_route','resolved_waypoint_count')
-              | int(0) %}{% set u =
-              state_attr('sensor.vatsim_flight_route','unresolved_token_count')
-              | int(0) %}{% if s in ['unknown', 'unavailable'] %}{{ 'Tracker not
-              running' if states.sensor.vatsim_feed_health is none else 'Feed
-              unavailable' }}{% elif s == 'ok' %}{{ r }} waypoints plotted{% if
-              u > 0 %}, {{ u }} unresolved{% endif %}{% elif s ==
-              'navdata_unavailable' %}Route line off: navdata not loaded{% elif
-              s != 'no_flight_plan' %}Route could not be plotted{% endif %}
-            multiline_secondary: true
-            grid_options:
-              columns: full
-            tap_action:
-              action: none
-            hold_action:
-              action: none
-    cards: []
-  - title: Alerts
-    path: vatsim-alerts
-    icon: mdi:bell-cog
-    type: sections
-    max_columns: 2
-    sections:
-      - type: grid
-        cards:
-          - type: heading
-            heading: Alert Controls
-            heading_style: subtitle
-            icon: mdi:bell-cog
-          - type: tile
-            entity: input_select.vatsim_alert_mode
-            name: Alert mode
-            features_position: bottom
-            features:
-              - type: select-options
-            grid_options:
-              columns: full
-          - type: entities
-            show_header_toggle: false
-            state_color: true
-            entities:
-              - entity: input_boolean.vatsim_alerts_immediate
-                name: ATC Online Alerts
-              - entity: input_boolean.vatsim_alerts_lookahead
-                name: Lookahead Alerts
-              - entity: input_boolean.vatsim_alerts_atis
-                name: ATIS Change Alerts
-          - type: markdown
-            text_only: true
-            content: >-
-              **Alert mode** chooses where announcements go: Push is a
-              notification, Speaker is speech on the speakers switched on under
-              Speaker Targets. **ATC Online** announces a controller coming
-              online over your position. **Lookahead** announces the next
-              controller ahead on your track. **ATIS Change** announces a new
-              ATIS letter at the airport on the ATIS card. Feed and tracker
-              health pushes are always sent, whatever the mode.
-            grid_options:
-              columns: full
-      - type: grid
-        cards:
-          - type: heading
-            heading: Speaker Targets
-            heading_style: subtitle
-            icon: mdi:speaker-multiple
-          - type: custom:button-card
-            template: vatsim_speaker
-            entity: input_boolean.vatsim_speaker_1
-            name: Speaker 1
-            icon: mdi:speaker
-            grid_options:
-              columns: 4
-              rows: 1
-          - type: custom:button-card
-            template: vatsim_speaker
-            entity: input_boolean.vatsim_speaker_2
-            name: Speaker 2
-            icon: mdi:speaker
-            grid_options:
-              columns: 4
-              rows: 1
-    cards: []
+- title: VATSIM
+  path: vatsim
+  icon: mdi:airplane
+  type: sections
+  max_columns: 3
+  sections:
+  - type: grid
+    cards:
+    - type: heading
+      heading: Flight Status
+      heading_style: title
+      icon: mdi:radio-tower
+    - type: custom:mushroom-template-card
+      entity: sensor.vatsim_tracker_feed_health
+      primary: '{% set h = ''sensor.vatsim_tracker_feed_health'' %}{% if states.sensor.vatsim_tracker_feed_health is none %}Tracker not running{% else %}{% set ns = namespace(n=0) %}{% if states(h) != ''healthy'' %}{% set ns.n = ns.n + 1 %}{% endif %}{% if (state_attr(h,''timestamp_status'') or ''ok'') != ''ok'' %}{% set ns.n = ns.n + 1 %}{% endif %}{% if state_attr(h,''geometry_status'') != ''ready'' %}{% set ns.n = ns.n + 1 %}{% endif %}{% if state_attr(h,''navdata_status'') in [''configured_but_unloaded'',''configured_but_empty'',''expired''] %}{% set ns.n = ns.n + 1 %}{% endif %}{% if state_attr(h,''nat_track_status'') in [''expired'',''unloaded''] %}{% set ns.n = ns.n + 1 %}{% endif %}{% if state_attr(h,''publish_unverified'') %}{% set ns.n = ns.n + 1 %}{% endif %}{{ ''Data OK'' if ns.n == 0 else ns.n ~ ('' data problem'' if ns.n == 1 else '' data problems'') }}{% endif %}'
+      secondary: '{% set h = ''sensor.vatsim_tracker_feed_health'' %}{% if states.sensor.vatsim_tracker_feed_health is none %}Check the Home Assistant log{% else %}{% set ns = namespace(l=[]) %}{% set last = state_attr(h,''last_success_ts'') | float(0) %}{% if states(h) != ''healthy'' %}{% set ns.l = ns.l + [''Feed '' ~ states(h) ~ ('', last good fetch '' ~ ((now().timestamp() - last) / 60) | round(0) | int ~ '' min ago'' if last > 0 else '''')] %}{% endif %}{% set ts = state_attr(h,''timestamp_status'') or ''ok'' %}{% if ts != ''ok'' %}{% set ns.l = ns.l + [''Feed '' ~ ts | replace(''_'','' '')] %}{% endif %}{% if state_attr(h,''geometry_status'') != ''ready'' %}{% set ns.l = ns.l + [''Boundaries loading: coverage reads Uncontrolled until ready''] %}{% endif %}{% set nd = state_attr(h,''navdata_status'') %}{% if nd in [''configured_but_unloaded'',''configured_but_empty''] %}{% set ns.l = ns.l + [''Navdata '' ~ nd | replace(''configured_but_'','''') ~ '': no route line''] %}{% elif nd == ''expired'' %}{% set ns.l = ns.l + [''Navdata AIRAC '' ~ (state_attr(h,''navdata_cycle'') or ''?'') ~ '' expired '' ~ (state_attr(h,''navdata_valid_until'') or '''') ~ '': route line may use retired fixes''] %}{% endif %}{% set nat = state_attr(h,''nat_track_status'') %}{% if nat in [''expired'',''unloaded''] %}{% set ns.l = ns.l + [''NAT tracks '' ~ nat ~ '': oceanic route line may be wrong''] %}{% endif %}{% if state_attr(h,''publish_unverified'') %}{% set ns.l = ns.l + [''HA not holding '' ~ state_attr(h,''publish_unverified'')] %}{% endif %}{% if state_attr(h,''app_dep_status'') != ''active'' %}{% set ns.l = ns.l + [''Approach and departure boundaries off: an APP or DEP controller alone reads Uncontrolled''] %}{% endif %}{{ ns.l | join(''. '') if ns.l else ''Feed, boundaries, navdata and NAT tracks current'' }}{% endif %}'
+      icon: mdi:shield-check-outline
+      color: '{% set h = ''sensor.vatsim_tracker_feed_health'' %}{% if states.sensor.vatsim_tracker_feed_health is none or states(h) not in [''healthy'',''degraded''] %}red{% elif states(h) == ''degraded'' or (state_attr(h,''timestamp_status'') or ''ok'') != ''ok'' or state_attr(h,''geometry_status'') != ''ready'' or state_attr(h,''publish_unverified'') or state_attr(h,''navdata_status'') in [''configured_but_unloaded'',''configured_but_empty'',''expired''] or state_attr(h,''nat_track_status'') in [''expired'',''unloaded''] %}amber{% else %}green{% endif %}'
+      multiline_secondary: true
+      grid_options:
+        columns: full
+      tap_action:
+        action: more-info
+      hold_action:
+        action: none
+    - type: custom:mushroom-template-card
+      primary: Pilot
+      secondary: '{% if not has_value(''binary_sensor.vatsim_tracker_pilot_connected'') %}{{ ''Tracker not running'' if states.sensor.vatsim_tracker_feed_health is none else ''Feed unavailable'' }}{% else %}{% if is_state(''binary_sensor.vatsim_tracker_pilot_connected'',''on'') %}Connected{% else %}Disconnected{% endif %}{% endif %}'
+      icon: mdi:airplane
+      grid_options:
+        columns: 6
+      color: '{% if is_state(''binary_sensor.vatsim_tracker_pilot_connected'',''on'') %}green{% else %}grey{% endif %}'
+      multiline_secondary: true
+      tap_action:
+        action: none
+      hold_action:
+        action: none
+    - type: custom:mushroom-template-card
+      primary: ATC Coverage
+      secondary: '{% if not has_value(''binary_sensor.vatsim_tracker_atc_coverage'') %}{{ ''Tracker not running'' if states.sensor.vatsim_tracker_feed_health is none else ''Feed unavailable'' }}{% else %}{% if is_state(''binary_sensor.vatsim_tracker_atc_coverage'',''on'') %}Controlled{% else %}Uncontrolled{% endif %}{% endif %}'
+      icon: mdi:radio-tower
+      grid_options:
+        columns: 6
+      color: '{% if is_state(''binary_sensor.vatsim_tracker_atc_coverage'',''on'') %}green{% else %}grey{% endif %}'
+      multiline_secondary: true
+      tap_action:
+        action: none
+      hold_action:
+        action: none
+    - type: heading
+      heading: Radios
+      heading_style: subtitle
+      icon: mdi:radio-handheld
+    - type: custom:button-card
+      entity: binary_sensor.vatsim_tracker_atc_coverage
+      section_mode: true
+      grid_options:
+        columns: full
+        rows: 2
+      show_name: false
+      show_icon: false
+      show_state: false
+      tap_action:
+        action: more-info
+      hold_action:
+        action: none
+      tooltip: 'Left: the controller covering you now (UNICOM 122.800 if none). Right: the controller at the position projected ahead on your current heading and groundspeed.'
+      extra_styles: |-
+        .lbl { font-size: 0.7rem; color: var(--secondary-text-color); letter-spacing: 1px; font-weight: 600; }
+        .val { font-variant-numeric: tabular-nums; font-size: 1.5rem; font-weight: 600; color: var(--primary-text-color); line-height: 1.25; }
+        .big { font-variant-numeric: tabular-nums; font-size: 1.6rem; font-weight: 600; line-height: 1.15; margin: 2px 0; }
+        .u { font-size: 0.75rem; color: var(--secondary-text-color); margin-left: 2px; }
+        .sub { font-size: 0.85rem; color: var(--primary-text-color); white-space: normal; }
+        .dim { font-size: 0.75rem; color: var(--secondary-text-color); }
+        .badge { border: 1px solid; border-radius: 6px; padding: 3px 8px; text-align: right; }
+        .blbl { font-size: 0.7rem; font-weight: 600; letter-spacing: 0.5px; line-height: 1.1; }
+        .bfreq { font-variant-numeric: tabular-nums; font-size: 1.1rem; font-weight: 600; color: var(--primary-text-color); line-height: 1.2; }
+      styles:
+        card:
+        - padding: 12px 14px
+        grid:
+        - grid-template-areas: '''act arr nxt'''
+        - grid-template-columns: 1fr 26px 1fr
+        - align-items: center
+        custom_fields:
+          act:
+          - text-align: left
+          - justify-self: stretch
+          arr:
+          - justify-self: center
+          nxt:
+          - text-align: right
+          - justify-self: stretch
+      custom_fields:
+        act: |-
+          [[[
+          const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+          const pc = states['binary_sensor.vatsim_tracker_pilot_connected']; const on = !!pc && pc.state === 'on';
+          const fh = states['sensor.vatsim_tracker_feed_health'];
+          const cov = entity;
+          let f = '---.---', c = 'var(--secondary-text-color)', s;
+          if (!fh) s = 'Tracker not running';
+          else if (!cov || !['on', 'off'].includes(cov.state)) s = 'Feed unavailable';
+          else if (!on) s = 'Not connected';
+          else if (cov.state === 'on') {
+            const a = cov.attributes;
+            f = a.frequency ? esc(a.frequency) : '---.---'; c = 'var(--green-color, #4caf50)';
+            s = esc(a.controller_callsign || 'Controller online');
+          } else { f = '122.800'; c = 'var(--blue-grey-color, #607d8b)'; s = 'UNICOM, no ATC covers you'; }
+          return `<div class="lbl">ACTIVE COMM</div><div class="big" style="color: ${c}">${f}</div><div class="sub">${s}</div>`;
+          ]]]
+        arr: |-
+          [[[
+          const ns = states['sensor.vatsim_tracker_next_sector'];
+          const k = ns ? ns.attributes.result_kind : null;
+          const c = k === 'different_sector' ? 'var(--amber-color, #ffc107)' : (k === 'projected_uncontrolled' ? 'var(--deep-orange-color, #ff6f22)' : 'var(--divider-color)');
+          return `<ha-icon icon="mdi:chevron-double-right" style="color: ${c}; --mdc-icon-size: 22px;"></ha-icon>`;
+          ]]]
+        nxt: |-
+          [[[
+          const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+          const pc = states['binary_sensor.vatsim_tracker_pilot_connected']; const on = !!pc && pc.state === 'on';
+          const ns = states['sensor.vatsim_tracker_next_sector'];
+          const a = ns ? ns.attributes : {};
+          const k = a.result_kind;
+          const eta = a.eta_text ? esc(a.eta_text) : '';
+          const nm = typeof a.eta_distance_nm === 'number' ? Math.round(a.eta_distance_nm) + ' nm' : '';
+          const when = [eta, nm].filter(Boolean).join(', ');
+          const paused = {skipped_low_speed: 'Paused: groundspeed too low', skipped_unstable_heading: 'Paused: heading changing',
+                          skipped_insufficient_history: 'Gathering heading data'};
+          let f = '---.---', c = 'var(--secondary-text-color)', s;
+          if (!ns || ['unknown', 'unavailable'].includes(ns.state)) s = states['sensor.vatsim_tracker_feed_health'] ? 'No lookahead data' : 'Tracker not running';
+          else if (!on) s = 'Not connected';
+          else if (k === 'different_sector' && a.next_controller_callsign) {
+            f = a.next_frequency ? esc(a.next_frequency) : '---.---'; c = 'var(--amber-color, #ffc107)';
+            s = esc(a.next_controller_callsign) + (when ? ` <span class="dim">${when}</span>` : '');
+          } else if (k === 'projected_uncontrolled') {
+            f = '122.800'; c = 'var(--deep-orange-color, #ff6f22)'; s = 'Leaving coverage' + (when ? ` <span class="dim">${when}</span>` : '');
+          } else if (k === 'same_sector') s = 'No handoff ahead';
+          else if (k && k.startsWith('skipped_')) s = paused[k] || 'Lookahead paused';
+          else s = 'Nothing ahead';
+          const note = {altitude_gate: 'Approach sectors excluded in cruise', ambiguous_trend: 'Climb or descent unclear'}[a.projection_note];
+          return `<div class="lbl">NEXT SECTOR</div><div class="big" style="color: ${c}">${f}</div>`
+            + `<div class="sub">${s}</div>` + (on && note ? `<div class="dim">${note}</div>` : '');
+          ]]]
+    - type: heading
+      heading: ATIS
+      heading_style: subtitle
+      icon: mdi:information-outline
+    - type: entities
+      show_header_toggle: false
+      entities:
+      - entity: text.vatsim_tracker_atis_airport
+        name: ATIS airport (blank = automatic)
+    - type: custom:button-card
+      entity: sensor.vatsim_tracker_destination
+      section_mode: true
+      grid_options:
+        columns: full
+        rows: 3
+      show_name: false
+      show_icon: false
+      show_state: false
+      tap_action:
+        action: more-info
+      hold_action:
+        action: none
+      tooltip: 'On the ground at your filed departure: its ATIS (departure ATIS first). Once airborne: your arrival, once inside the ATIS range (100 nm unless you set destination_range_nm). A typed-in ATIS airport overrides both, connected or not. Tap for the full text.'
+      extra_styles: |-
+        .lbl { font-size: 0.7rem; color: var(--secondary-text-color); letter-spacing: 1px; font-weight: 600; }
+        .val { font-variant-numeric: tabular-nums; font-size: 1.5rem; font-weight: 600; color: var(--primary-text-color); line-height: 1.25; }
+        .big { font-variant-numeric: tabular-nums; font-size: 1.6rem; font-weight: 600; line-height: 1.15; margin: 2px 0; }
+        .u { font-size: 0.75rem; color: var(--secondary-text-color); margin-left: 2px; }
+        .sub { font-size: 0.85rem; color: var(--primary-text-color); white-space: normal; }
+        .dim { font-size: 0.75rem; color: var(--secondary-text-color); }
+        .badge { border: 1px solid; border-radius: 6px; padding: 3px 8px; text-align: right; }
+        .blbl { font-size: 0.7rem; font-weight: 600; letter-spacing: 0.5px; line-height: 1.1; }
+        .bfreq { font-variant-numeric: tabular-nums; font-size: 1.1rem; font-weight: 600; color: var(--primary-text-color); line-height: 1.2; }
+        .txt { font-size: 0.8rem; color: var(--secondary-text-color); white-space: normal; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+      styles:
+        card:
+        - padding: 12px 14px
+        grid:
+        - grid-template-areas: '''apt atis'' ''txt txt'''
+        - grid-template-columns: 1fr 1fr
+        - grid-template-rows: auto 1fr
+        - row-gap: 8px
+        - align-items: start
+        custom_fields:
+          apt:
+          - text-align: left
+          - justify-self: stretch
+          atis:
+          - text-align: right
+          - justify-self: stretch
+          txt:
+          - text-align: left
+          - justify-self: stretch
+      custom_fields:
+        apt: |-
+          [[[
+          const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+          const a = entity ? entity.attributes : {};
+          const lbl = {departure: 'DEPARTURE', arrival: 'DESTINATION', selected: 'SELECTED'}[a.role] || 'AIRPORT';
+          // State "departure" means on the ground within departure_near_nm of the filed departure.
+          const near = !!entity && entity.state === 'departure';
+          const d = near ? 'At the field' : (typeof a.distance_nm === 'number' ? Math.round(a.distance_nm) + ' nm' : '---');
+          return `<div class="lbl">${lbl}</div><div class="big">${a.airport ? esc(a.airport) : '----'}</div><div class="sub">${d}</div>`;
+          ]]]
+        atis: |-
+          [[[
+          const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+          const a = entity ? entity.attributes : {};
+          if (!a.atis_online) return `<div class="lbl">ATIS</div><div class="big" style="color: var(--secondary-text-color)">-</div><div class="sub">No ATIS online</div>`;
+          const code = a.atis_code ? esc(String(a.atis_code).toUpperCase()) : '?';
+          const f = a.atis_frequency ? esc(a.atis_frequency) : '';
+          return `<div class="lbl">ATIS</div><div class="big" style="color: var(--amber-color, #ffc107)">${code}</div><div class="sub">${f}</div>`;
+          ]]]
+        txt: |-
+          [[[
+          const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+          const a = entity ? entity.attributes : {};
+          return a.atis_online && a.atis_text ? `<div class="txt">${esc(a.atis_text)}</div>` : '';
+          ]]]
+      visibility:
+      - condition: state
+        entity: sensor.vatsim_tracker_destination
+        state:
+        - departure
+        - in_range
+        - selected
+  - type: grid
+    column_span: 2
+    cards:
+    - type: heading
+      heading: Telemetry
+      heading_style: title
+      icon: mdi:gauge
+    - type: custom:button-card
+      entity: device_tracker.vatsim_tracker_aircraft
+      section_mode: true
+      grid_options:
+        columns: full
+        rows: 2
+      show_name: false
+      show_icon: false
+      show_state: false
+      tap_action:
+        action: more-info
+      hold_action:
+        action: none
+      tooltip: Latest position report from the VATSIM feed. Tap for the aircraft history.
+      extra_styles: |-
+        .lbl { font-size: 0.7rem; color: var(--secondary-text-color); letter-spacing: 1px; font-weight: 600; }
+        .val { font-variant-numeric: tabular-nums; font-size: 1.5rem; font-weight: 600; color: var(--primary-text-color); line-height: 1.25; }
+        .big { font-variant-numeric: tabular-nums; font-size: 1.6rem; font-weight: 600; line-height: 1.15; margin: 2px 0; }
+        .u { font-size: 0.75rem; color: var(--secondary-text-color); margin-left: 2px; }
+        .sub { font-size: 0.85rem; color: var(--primary-text-color); white-space: normal; }
+        .dim { font-size: 0.75rem; color: var(--secondary-text-color); }
+        .badge { border: 1px solid; border-radius: 6px; padding: 3px 8px; text-align: right; }
+        .blbl { font-size: 0.7rem; font-weight: 600; letter-spacing: 0.5px; line-height: 1.1; }
+        .bfreq { font-variant-numeric: tabular-nums; font-size: 1.1rem; font-weight: 600; color: var(--primary-text-color); line-height: 1.2; }
+      styles:
+        card:
+        - padding: 12px 14px
+        grid:
+        - grid-template-areas: '''cs alt gs hdg st'''
+        - grid-template-columns: 1.3fr 1fr 1fr 1fr 1.4fr
+        - align-items: center
+        custom_fields:
+          cs:
+          - justify-self: stretch
+          - text-align: left
+          - border-right: 1px solid var(--divider-color)
+          - padding-right: 10px
+          alt:
+          - text-align: center
+          gs:
+          - text-align: center
+          hdg:
+          - text-align: center
+          - border-right: 1px solid var(--divider-color)
+          - padding-right: 10px
+          st:
+          - justify-self: end
+          - padding-left: 10px
+      custom_fields:
+        cs: |-
+          [[[
+          const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+          const pc = states['binary_sensor.vatsim_tracker_pilot_connected']; const on = !!pc && pc.state === 'on';
+          const a = entity ? entity.attributes : {};
+          const cs = a.callsign ? esc(a.callsign) : '------';
+          return `<div class="lbl">${on ? 'CALLSIGN' : 'LAST FLIGHT'}</div>`
+            + `<div class="val" style="color: ${on ? 'var(--green-color, #4caf50)' : 'var(--secondary-text-color)'}">${cs}</div>`;
+          ]]]
+        alt: |-
+          [[[
+          const pc = states['binary_sensor.vatsim_tracker_pilot_connected']; const on = !!pc && pc.state === 'on';
+          const num = (x) => typeof x === 'number' && isFinite(x);
+          const a = entity ? entity.attributes : {};
+          const r = a.altitude_ft;
+          // Some hosts drop a 0 attribute; with a position published, a missing value is 0.
+          const v = r === undefined || r === null ? (on && typeof a.latitude === 'number' ? 0 : undefined) : r;
+          const t = on && num(v) ? Math.round(v).toLocaleString('en-US') : '---';
+          return `<div class="lbl">ALTITUDE</div><div class="val">${t}<span class="u">FT</span></div>`;
+          ]]]
+        gs: |-
+          [[[
+          const pc = states['binary_sensor.vatsim_tracker_pilot_connected']; const on = !!pc && pc.state === 'on';
+          const num = (x) => typeof x === 'number' && isFinite(x);
+          const a = entity ? entity.attributes : {};
+          const r = a.groundspeed_kt;
+          // Some hosts drop a 0 attribute; with a position published, a missing value is 0.
+          const v = r === undefined || r === null ? (on && typeof a.latitude === 'number' ? 0 : undefined) : r;
+          const t = on && num(v) ? String(Math.round(v)) : '---';
+          return `<div class="lbl">GS</div><div class="val">${t}<span class="u">KT</span></div>`;
+          ]]]
+        hdg: |-
+          [[[
+          const pc = states['binary_sensor.vatsim_tracker_pilot_connected']; const on = !!pc && pc.state === 'on';
+          const num = (x) => typeof x === 'number' && isFinite(x);
+          const a = entity ? entity.attributes : {};
+          const r = a.heading_deg;
+          // Some hosts drop a 0 attribute; with a position published, a missing value is 0.
+          const v = r === undefined || r === null ? (on && typeof a.latitude === 'number' ? 0 : undefined) : r;
+          // 360 reads as 360, not 000, matching aviation convention.
+          const h = num(v) ? (Math.round(v) % 360 || 360) : null;
+          const t = on && h !== null ? String(h).padStart(3, '0') + '&deg;' : '---';
+          return `<div class="lbl">HDG</div><div class="val">${t}</div>`;
+          ]]]
+        st: |-
+          [[[
+          const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+          const pc = states['binary_sensor.vatsim_tracker_pilot_connected']; const on = !!pc && pc.state === 'on';
+          const fh = states['sensor.vatsim_tracker_feed_health'];
+          const cov = states['binary_sensor.vatsim_tracker_atc_coverage'];
+          let t, f, c;
+          if (!fh) { t = 'TRACKER OFF'; f = '---.---'; c = 'var(--red-color, #f44336)'; }
+          else if (!cov || !['on', 'off'].includes(cov.state)) { t = 'NO ATC DATA'; f = '---.---'; c = 'var(--secondary-text-color)'; }
+          else if (!on) { t = 'OFFLINE'; f = '---.---'; c = 'var(--secondary-text-color)'; }
+          else if (cov.state === 'on') { t = 'ATC ONLINE'; f = cov.attributes.frequency ? esc(cov.attributes.frequency) : '---.---'; c = 'var(--green-color, #4caf50)'; }
+          else { t = 'UNICOM'; f = '122.800'; c = 'var(--blue-grey-color, #607d8b)'; }
+          return `<div class="badge" style="border-color: ${c}; background: color-mix(in srgb, ${c} 15%, transparent)">`
+            + `<div class="blbl" style="color: ${c}">${t}</div><div class="bfreq">${f}</div></div>`;
+          ]]]
+    - type: custom:map-card
+      title: Session Map
+      grid_options:
+        columns: full
+      focus_entity: device_tracker.vatsim_tracker_aircraft
+      focus_follow: contains
+      zoom: 7
+      card_size: 14
+      entities:
+      - entity: device_tracker.vatsim_tracker_aircraft
+        display: icon
+        icon: mdi:airplane
+        color: '#1565c0'
+        size: 24
+      - entity: sensor.vatsim_tracker_session_track
+        focus_on_fit: false
+        fixed_x: -98.5
+        fixed_y: 39.8
+        geojson:
+          attribute: track_geojson
+          color: '#1565c0'
+          weight: 3
+          opacity: 0.9
+          hide_marker: true
+      - entity: sensor.vatsim_tracker_flight_route
+        focus_on_fit: false
+        fixed_x: -98.5
+        fixed_y: 39.8
+        geojson:
+          attribute: route_geojson
+          color: '#8e24aa'
+          weight: 2
+          opacity: 0.85
+          dash_array: 6, 6
+          hide_marker: true
+      - entity: sensor.vatsim_tracker_online_atc_boundaries
+        focus_on_fit: false
+        fixed_x: -98.5
+        fixed_y: 39.8
+        geojson:
+          attribute: all_boundaries_geojson
+          color: '#5c6bc0'
+          weight: 2
+          opacity: 0.9
+          fill_opacity: 0.06
+          hide_marker: true
+      - entity: binary_sensor.vatsim_tracker_atc_coverage
+        focus_on_fit: false
+        fixed_x: -98.5
+        fixed_y: 39.8
+        geojson:
+          attribute: boundary_geojson
+          color: '#2e7d32'
+          weight: 2
+          opacity: 0.8
+          fill_opacity: 0.12
+          hide_marker: true
+      - entity: sensor.vatsim_tracker_next_sector
+        focus_on_fit: false
+        fixed_x: -98.5
+        fixed_y: 39.8
+        geojson:
+          attribute: next_boundary_geojson
+          color: '#f9a825'
+          weight: 2
+          opacity: 0.7
+          fill_opacity: 0.08
+          hide_marker: true
+      visibility:
+      - condition: state
+        entity: device_tracker.vatsim_tracker_aircraft
+        state_not:
+        - unknown
+        - unavailable
+      theme_mode: dark
+    - type: markdown
+      text_only: true
+      content: <font color="#1565c0">&#9992;</font> You and your track &nbsp; <font color="#2e7d32">&#9632;</font> Your controller &nbsp; <font color="#f9a825">&#9632;</font> Next controller &nbsp; <font color="#5c6bc0">&#9633;</font> Other online sectors &nbsp; <font color="#8e24aa">- - -</font> Filed route
+      grid_options:
+        columns: full
+      visibility:
+      - condition: state
+        entity: device_tracker.vatsim_tracker_aircraft
+        state_not:
+        - unknown
+        - unavailable
+    - type: markdown
+      title: Session Map
+      grid_options:
+        columns: full
+      content: '{% if states.sensor.vatsim_tracker_feed_health is none %}The map appears once the tracker is running and has your aircraft position. The tracker is not set up yet: add the VATSIM ATC Tracker integration.{% elif states.device_tracker.vatsim_tracker_aircraft is none %}The map appears the first time you connect to VATSIM. After that it keeps your last position between flights.{% else %}The aircraft has no saved position, so the map is hidden. If you have flown before, the restore after a restart failed: check the Home Assistant log for vatsim_atc.{% endif %}'
+      visibility:
+      - condition: state
+        entity: device_tracker.vatsim_tracker_aircraft
+        state:
+        - unknown
+        - unavailable
+    - type: heading
+      heading: Flight Plan
+      heading_style: title
+      icon: mdi:map-marker-path
+    - type: custom:mushroom-template-card
+      primary: '{% set d = state_attr(''sensor.vatsim_tracker_flight_route'',''departure'') %}{% set a = state_attr(''sensor.vatsim_tracker_flight_route'',''arrival'') %}{% if d and a %}{{ d }} to {{ a }}{% else %}No flight plan filed{% endif %}'
+      secondary: '{% set s = states(''sensor.vatsim_tracker_flight_route'') %}{% set r = state_attr(''sensor.vatsim_tracker_flight_route'',''resolved_waypoint_count'') | int(0) %}{% set u = state_attr(''sensor.vatsim_tracker_flight_route'',''unresolved_token_count'') | int(0) %}{% if s in [''unknown'', ''unavailable''] %}{{ ''Tracker not running'' if states.sensor.vatsim_tracker_feed_health is none else ''Feed unavailable'' }}{% elif s == ''ok'' %}{{ r }} waypoints plotted{% if u > 0 %}, {{ u }} unresolved{% endif %}{% elif s == ''navdata_unavailable'' %}Route line off: navdata not loaded{% elif s != ''no_flight_plan'' %}Route could not be plotted{% endif %}'
+      multiline_secondary: true
+      grid_options:
+        columns: full
+      tap_action:
+        action: none
+      hold_action:
+        action: none
+  cards: []
+- title: Alerts
+  path: vatsim-alerts
+  icon: mdi:bell-cog
+  type: sections
+  max_columns: 2
+  sections:
+  - type: grid
+    cards:
+    - type: heading
+      heading: Alert Controls
+      heading_style: subtitle
+      icon: mdi:bell-cog
+    - type: tile
+      entity: input_select.vatsim_alert_mode
+      name: Alert mode
+      features_position: bottom
+      features:
+      - type: select-options
+      grid_options:
+        columns: full
+    - type: entities
+      show_header_toggle: false
+      state_color: true
+      entities:
+      - entity: input_boolean.vatsim_alerts_immediate
+        name: ATC Online Alerts
+      - entity: input_boolean.vatsim_alerts_lookahead
+        name: Lookahead Alerts
+      - entity: input_boolean.vatsim_alerts_atis
+        name: ATIS Change Alerts
+    - type: markdown
+      text_only: true
+      content: '**Alert mode** chooses where announcements go: Push is a notification, Speaker is speech on the speakers switched on under Speaker Targets. **ATC Online** announces a controller coming online over your position. **Lookahead** announces the next controller ahead on your track. **ATIS Change** announces a new ATIS letter at the airport on the ATIS card. Feed and tracker health pushes are always sent, whatever the mode.'
+      grid_options:
+        columns: full
+  - type: grid
+    cards:
+    - type: heading
+      heading: Speaker Targets
+      heading_style: subtitle
+      icon: mdi:speaker-multiple
+    - type: custom:button-card
+      template: vatsim_speaker
+      entity: input_boolean.vatsim_speaker_1
+      name: Speaker 1
+      icon: mdi:speaker
+      grid_options:
+        columns: 4
+        rows: 1
+    - type: custom:button-card
+      template: vatsim_speaker
+      entity: input_boolean.vatsim_speaker_2
+      name: Speaker 2
+      icon: mdi:speaker
+      grid_options:
+        columns: 4
+        rows: 1
+  cards: []
