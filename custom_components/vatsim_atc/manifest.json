@@ -1,6 +1,7 @@
 {
   "domain": "vatsim_atc",
   "name": "VATSIM ATC Tracker",
+  "categories": ["vehicles_transport.flights"],
   "codeowners": ["@SavBuilds"],
   "config_flow": true,
   "documentation": "https://github.com/SavBuilds/vatsim_ha_tracker",
