@@ -16,3 +16,6 @@ __pycache__/
 # Dry-run cache: a full feed snapshot with other pilots in it.
 dryrun-cache/
 .dryrun-cache/
+# SimAware boundaries (CC BY-SA 4.0): build locally with tools/build_simaware.py, never commit.
+TRACONBoundaries.geojson
+simaware-tracon-project/

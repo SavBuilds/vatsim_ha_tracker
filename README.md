@@ -119,7 +119,14 @@ Copy the folder `apps/vatsim_atc_tracker/` into the AppDaemon apps folder. From 
 - **Navigraph subscribers:** in Navigraph FMS Data Manager, add an X-Plane 12 entry with a manual path pointing at a folder on your Home Assistant config share, for example `vatsim/navdata`. Run Data Manager again each AIRAC cycle. The tracker notices changed files within the hour and warns you when the cycle expires.
 - **Without Navigraph:** copy the same four files from your own X-Plane 12 installation.
 
-**Approach and departure boundaries.** Download the compiled `TRACONBoundaries.geojson` from the [SimAware TRACON Project](https://github.com/vatsimnetwork/simaware-tracon-project) releases and place it in your config share, for example `vatsim/simaware/`. Point `simaware_boundaries_path` at the file. A folder also works, but only its `*.geojson` files are read.
+**Approach and departure boundaries.** The [SimAware TRACON Project](https://github.com/vatsimnetwork/simaware-tracon-project) keeps one boundary per file, and the tracker reads a single GeoJSON file, so build one on any computer with Python:
+
+```
+git clone https://github.com/vatsimnetwork/simaware-tracon-project
+python tools/build_simaware.py simaware-tracon-project TRACONBoundaries.geojson
+```
+
+Place the result in your config share, for example `vatsim/simaware/`, and point `simaware_boundaries_path` at it. Run the script again to refresh the boundaries. A folder also works as the path, but only its `*.geojson` files are read.
 
 ### 4. Configure the app
 
@@ -255,6 +262,7 @@ python -m unittest discover -s tests -v      # 28 tests, synthetic navdata, no n
 python tools/check_docs.py                   # README names must exist in the code
 python tools/pii_scan.py .                   # personal-data scan before a release
 python tools/dryrun_compare.py OLD.py NEW.py --apps-yaml apps.yaml --sample-online
+python tools/build_simaware.py CLONE OUT     # merge SimAware boundaries into one file
 ```
 
 `dryrun_compare.py` fetches the public feeds once and shows whether two versions of the app would publish the same states. It writes nothing to Home Assistant.
