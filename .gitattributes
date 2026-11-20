@@ -1,0 +1,3 @@
+# Keep every text file LF in the repository and in every checkout, so a
+# Windows clone cannot reintroduce CRLF and change file hashes.
+* text=auto eol=lf
