@@ -5,3 +5,4 @@ README.md	notify-target	notify\.mobile_app_<device>
 custom_components/vatsim_atc/core/engine.py	key-assignment	_published_tokens\.get|No token: nothing written yet
 commit	email	^(author|committer|tagger) .* <\d+\+[A-Za-z0-9-]+@users\.noreply\.github\.com>
 apps/vatsim_atc_tracker/vatsim_atc_tracker.py	key-assignment	_published_tokens\.get|No token: AppDaemon restarted
+commit	email	^committer GitHub <noreply@github\.com> 
