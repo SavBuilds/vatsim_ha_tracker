@@ -136,6 +136,10 @@ DEFAULT_NAVDATA_REFRESH_INTERVAL_DAYS = 30
 NAVDATA_SOURCE_FILES = ("cycle.json", "cycle_info.txt", "earth_fix.dat", "earth_nav.dat",
                         "earth_awy.dat", "earth_aptmeta.dat")
 NAVDATA_CHANGE_CHECK_SECONDS = 3600
+# A load that failed at start is retried on this schedule until it succeeds. Without it the
+# next attempt would be the scheduled refresh, which for boundaries is a week away.
+STARTUP_RETRY_FIRST_SECONDS = 120
+STARTUP_RETRY_INTERVAL_SECONDS = 300
 _MONTHS = {m: i for i, m in enumerate(("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG",
                                        "SEP", "OCT", "NOV", "DEC"), start=1)}
 DEBOUNCE_THRESHOLD = 2  # consecutive polls required before publishing an identity change
@@ -545,21 +549,26 @@ class VatsimAtcEngine:
         self._init_state()
         self._last_aircraft_attrs = self._load_last_aircraft()
 
-        threading.Thread(
-            target=self._load_geometry_worker, daemon=True, name="vatsim-geom-loader"
-        ).start()
+        self._start_geometry_worker("vatsim-geom-loader")
 
+        # Each periodic refresh first fires one full interval after start. The loads above and
+        # below are the initial ones; firing the refresh seconds later would repeat them.
         self.run_every(
             self._schedule_geometry_refresh,
-            self.datetime() + timedelta(seconds=30),
+            self.datetime() + timedelta(seconds=self.geometry_refresh_interval_seconds),
             self.geometry_refresh_interval_seconds,
+        )
+        self.run_every(
+            self._retry_missing_loads,
+            self.datetime() + timedelta(seconds=STARTUP_RETRY_FIRST_SECONDS),
+            STARTUP_RETRY_INTERVAL_SECONDS,
         )
 
         if self.navdata_path:
             self._start_navdata_worker("vatsim-navdata-loader")
             self.run_every(
                 self._schedule_navdata_refresh,
-                self.datetime() + timedelta(seconds=45),
+                self.datetime() + timedelta(seconds=self.navdata_refresh_interval_seconds),
                 self.navdata_refresh_interval_seconds,
             )
             self.run_every(
@@ -580,11 +589,11 @@ class VatsimAtcEngine:
             ).start()
             self.run_every(
                 self._schedule_nat_track_refresh,
-                self.datetime() + timedelta(seconds=60),
+                self.datetime() + timedelta(seconds=self.nat_track_refresh_interval_seconds),
                 self.nat_track_refresh_interval_seconds,
             )
 
-        # B-METAR v2: a typed-in airport used to wait for the next poll (up to ~20 s), so a value
+        # A typed-in airport used to wait for the next poll (up to ~20 s), so a value
         # typed and cleared inside one poll was never seen. React to the helper directly.
         self.listen_state(self._on_atis_override_change, ATIS_AIRPORT_OVERRIDE_ENTITY_ID)
 
@@ -705,7 +714,7 @@ class VatsimAtcEngine:
         self._last_atis_list: List[Any] = []
         # Touched only on the host loop; fetch threads hand results back via run_in.
         self._metar_cache: Dict[str, Dict[str, Any]] = {}
-        # B-METAR v2: (point, departure, arrival) from the last connected poll, for republishing.
+        # (point, departure, arrival) from the last connected poll, for republishing.
         self._destination_ctx: Optional[Tuple[Any, str, str]] = None
         self._metar_inflight: Dict[str, float] = {}
         self._metar_last_attempt: Dict[str, float] = {}
@@ -768,9 +777,25 @@ class VatsimAtcEngine:
     # ---- Geometry loading (off main thread, atomic swap) ------------------
 
     def _schedule_geometry_refresh(self, kwargs) -> None:
-        threading.Thread(
-            target=self._load_geometry_worker, daemon=True, name="vatsim-geom-refresh"
-        ).start()
+        self._start_geometry_worker("vatsim-geom-refresh")
+
+    def _start_geometry_worker(self, name: str) -> None:
+        # One load at a time: a retry or refresh that fires during a slow load is skipped.
+        thread = getattr(self, "_geometry_thread", None)
+        if thread is not None and thread.is_alive():
+            return
+        self._geometry_thread = threading.Thread(target=self._load_geometry_worker, daemon=True, name=name)
+        self._geometry_thread.start()
+
+    def _retry_missing_loads(self, kwargs) -> None:
+        """Try again whatever is still not loaded. A start with no network yet, or one failed
+        download, would otherwise leave boundaries missing until the weekly refresh. Once
+        everything is loaded this does nothing. NAT tracks refresh often enough on their own."""
+        if self._geometry is None:
+            self.log("Boundaries not loaded; retrying the load", level="INFO")
+            self._start_geometry_worker("vatsim-geom-retry")
+        if self.navdata_path and self._navdata is None:
+            self._start_navdata_worker("vatsim-navdata-retry")  # skips itself while a load is running
 
     def _load_geometry_worker(self) -> None:
         try:
@@ -778,11 +803,14 @@ class VatsimAtcEngine:
             ctr_raw = self._fetch_and_parse_vatspy()
             tracon_features = self._fetch_and_parse_simaware()
         except Exception as exc:
+            if getattr(exc, "kind", "") == "Stopped":
+                return  # the host is shutting down mid-load: not a failure worth reporting
             self._last_geometry_refresh_error = f"{getattr(exc, 'kind', type(exc).__name__)}: {exc}"
             self._last_geometry_refresh_error_ts = time.time()
             self.log(f"Geometry load failed ({exc}); continuing to use the previous "
-                     f"geometry snapshot (version={self._geometry.version if self._geometry else None}) "
-                     f"until the next scheduled refresh", level="WARNING")
+                     f"geometry snapshot (version={self._geometry.version if self._geometry else None}). "
+                     f"A missing snapshot is retried within minutes, an existing one at the next "
+                     f"scheduled refresh", level="WARNING")
             return
 
         self._geometry_version_counter += 1

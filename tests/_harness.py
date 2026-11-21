@@ -33,6 +33,7 @@ class FakeHost:
     def __init__(self, args=None):
         self.args = dict(args or {})
         self.logs, self.states, self.writes, self.scheduled, self.listening = [], {}, [], [], []
+        self.every = []   # (callback name, seconds until the first run, interval)
 
     def log(self, message, level="INFO", **_):
         self.logs.append((level, str(message)))
@@ -45,6 +46,7 @@ class FakeHost:
 
     def run_every(self, callback, start, interval, **kwargs):
         self.scheduled.append((getattr(callback, "__name__", "?"), interval))
+        self.every.append((getattr(callback, "__name__", "?"), (start - self.datetime()).total_seconds(), interval))
 
     def listen_state(self, callback, entity_id, **kwargs):
         self.listening.append(entity_id)

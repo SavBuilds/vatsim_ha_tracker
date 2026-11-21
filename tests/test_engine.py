@@ -117,6 +117,68 @@ class Engine(unittest.TestCase):
         self.assertEqual(attrs["geometry_status"], "loading")
         self.assertEqual(attrs["last_geometry_refresh_error"], "ConnectionError: refused")
 
+    def test_periodic_refreshes_do_not_repeat_the_initial_loads(self):
+        self.app.initialize()
+        self.app._geometry_thread.join(10)
+        first = {name: (delay, interval) for name, delay, interval in self.app.every}
+        delay, interval = first["_schedule_geometry_refresh"]
+        self.assertEqual(interval, 7 * 24 * 3600)
+        self.assertAlmostEqual(delay, interval, delta=5)      # one full interval, not 30 seconds
+        delay, interval = first["_retry_missing_loads"]
+        self.assertAlmostEqual(delay, engine.STARTUP_RETRY_FIRST_SECONDS, delta=5)
+        self.assertEqual(interval, engine.STARTUP_RETRY_INTERVAL_SECONDS)
+        self.assertTrue(all(delay >= 100 for _n, delay, _i in self.app.every), self.app.every)
+
+    def test_retry_loads_boundaries_after_a_failed_start(self):
+        calls = []
+
+        def flaky(url, timeout, headers=None):
+            calls.append(url)
+            if len([u for u in calls if u == a.BOUNDARIES_URL]) == 1 and url == a.BOUNDARIES_URL:
+                raise engine.FetchError("network is unreachable", kind="OSError")
+            return a.serve(url, self.payload)
+        app = make_engine(fetch=flaky, vatspy_boundaries_url=a.BOUNDARIES_URL, vatspy_dat_url=a.DAT_URL,
+                          metar_fallback=False)
+        app._load_geometry_worker()              # the load at start fails
+        self.assertIsNone(app._geometry)
+        app._retry_missing_loads({})
+        app._geometry_thread.join(10)
+        self.assertIsNotNone(app._geometry)
+        self.assertTrue(any("retrying the load" in m for _l, m in app.logs))
+
+    def test_a_load_cut_short_by_shutdown_is_not_reported(self):
+        def stopping(url, timeout, headers=None):
+            raise engine.FetchError("the integration is stopping", kind="Stopped")
+        app = make_engine(fetch=stopping, vatspy_boundaries_url=a.BOUNDARIES_URL, vatspy_dat_url=a.DAT_URL)
+        app._load_geometry_worker()
+        self.assertEqual([m for lvl, m in app.logs if lvl != "INFO"], [])
+        self.assertIsNone(app._last_geometry_refresh_error)
+
+    def test_retry_does_nothing_once_loaded(self):
+        started = []
+        self.app._start_geometry_worker = started.append
+        self.app._start_navdata_worker = started.append
+        self.app._retry_missing_loads({})
+        self.assertEqual(started, [])
+
+    def test_only_one_boundary_load_runs_at_a_time(self):
+        import threading
+        gate, calls = threading.Event(), []
+
+        def slow(url, timeout, headers=None):
+            calls.append(url)
+            gate.wait(10)
+            return a.serve(url, self.payload)
+        app = make_engine(fetch=slow, vatspy_boundaries_url=a.BOUNDARIES_URL, vatspy_dat_url=a.DAT_URL,
+                          metar_fallback=False)
+        app._start_geometry_worker("first")
+        app._start_geometry_worker("second")     # skipped: the first is still downloading
+        app._retry_missing_loads({})             # also skipped
+        gate.set()
+        app._geometry_thread.join(10)
+        self.assertEqual(calls.count(a.BOUNDARIES_URL), 1)
+        self.assertIsNotNone(app._geometry)
+
     def test_host_contract_is_complete(self):
         used = {"log", "set_state", "get_state", "render_template", "call_service", "run_in", "run_every",
                 "listen_state", "datetime", "http_get"}
