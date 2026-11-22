@@ -6,7 +6,7 @@ It is a custom integration: one install, one setup dialog that asks for your VAT
 
 Needs Home Assistant 2026.10 or later.
 
-**Status: beta (2.0.0b2).** Version 2 is a rewrite of this project as a Home Assistant integration. The tracking logic is the same as version 1, the AppDaemon app, and was compared against it on live data. The Home Assistant side is new. Expect rough edges and please report them.
+**Status: beta (2.0.0b3).** Version 2 is a rewrite of this project as a Home Assistant integration. The tracking logic is the same as version 1, the AppDaemon app, and was compared against it on live data. The Home Assistant side is new. Expect rough edges and please report them.
 
 ![The dashboard in flight](docs/images/dashboard_main.png)
 

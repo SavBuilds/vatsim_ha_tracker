@@ -106,8 +106,25 @@ class HostWithEngine(unittest.TestCase):
     def test_none_attributes_are_dropped_and_plumbing_is_kept_for_the_entity_layer(self):
         self.tracker.start()
         self.assertTrue(wait_for(lambda: "sensor.vatsim_feed_health" in self.tracker.published))
-        for _state, attrs in self.tracker.published.values():
-            self.assertNotIn(None, attrs.values())
+        for entity_id, (_state, attrs) in self.tracker.published.items():
+            stable = const.STABLE_ATTRIBUTES.get(entity_id, ())
+            self.assertEqual([k for k, v in attrs.items() if v is None and k not in stable], [], entity_id)
+
+    def test_attributes_the_alerts_read_are_present_even_with_no_one_connected(self):
+        self.tracker = self.make(vatsim_cid="7654321")     # a CID that is not in the feed
+        self.tracker.start()
+        self.assertTrue(wait_for(lambda: all(e in self.tracker.published for e in const.STABLE_ATTRIBUTES)),
+                        self.tracker.published.keys())
+        self.assertEqual(self.state("binary_sensor.vatsim_pilot_connected")[0], "off")
+        for entity_id, keys in const.STABLE_ATTRIBUTES.items():
+            for key in keys:
+                self.assertIn(key, self.state(entity_id)[1], entity_id)
+                self.assertIsNone(self.state(entity_id)[1][key], entity_id)
+
+    def test_a_stable_attribute_keeps_its_value_when_it_has_one(self):
+        self.tracker.start()
+        self.assertTrue(wait_for(lambda: self.state("binary_sensor.vatsim_atc_coverage")[0] == "on"))
+        self.assertEqual(self.state("binary_sensor.vatsim_atc_coverage")[1]["controller_callsign"], "ZZA_CTR")
 
     def test_feed_failure_becomes_unavailable_not_a_crash(self):
         self.tracker.start()

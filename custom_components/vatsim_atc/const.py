@@ -1,7 +1,7 @@
 """Constants for the VATSIM ATC Tracker integration. No Home Assistant imports."""
 
 DOMAIN = "vatsim_atc"
-VERSION = "2.0.0b2"
+VERSION = "2.0.0b3"
 PROJECT_URL = "https://github.com/SavBuilds/vatsim_ha_tracker"
 USER_AGENT = f"vatsim_ha_tracker/{VERSION} (+{PROJECT_URL})"
 
@@ -27,6 +27,17 @@ UNRECORDED_ATTRIBUTES = frozenset({
     "all_boundaries_geojson", "boundary_geojson", "next_boundary_geojson", "route_geojson", "track_geojson",
     "points",
 })
+
+# Attributes that are always present on their entity, null when there is nothing to report.
+# Every other attribute is left out while it has no value. These are the ones the alerts
+# package triggers on or reads, and tools that check an automation's attribute names against
+# the entity (Spook, for one) report a missing key as an error whenever no one is connected.
+# Keys are the engine's own state names.
+STABLE_ATTRIBUTES = {
+    "binary_sensor.vatsim_atc_coverage": ("controller_callsign",),
+    "sensor.vatsim_next_sector": ("controller_callsign",),
+    "sensor.vatsim_destination": ("atis_code",),
+}
 
 
 def signal_for(entry_id: str, source_id: str) -> str:

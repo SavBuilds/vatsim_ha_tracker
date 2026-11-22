@@ -18,6 +18,7 @@ import threading
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
+from .const import STABLE_ATTRIBUTES
 from .core.engine import FetchError, Host, VatsimAtcEngine
 
 LEVELS = {"DEBUG": logging.DEBUG, "INFO": logging.DEBUG, "WARNING": logging.WARNING,
@@ -61,6 +62,8 @@ class LoopHost(Host):
         # The engine keeps the merged attributes (a publish adds to what was there); show those.
         merged = getattr(self, "_published_states", {}).get(entity_id, (None, kwargs.get("attributes") or {}))[1]
         attributes = {k: v for k, v in merged.items() if v is not None}
+        for key in STABLE_ATTRIBUTES.get(entity_id, ()):
+            attributes.setdefault(key, None)   # present but null, so the key never disappears
         self.published = {**self.published, entity_id: (kwargs.get("state"), attributes)}
         self._to_loop(self._on_publish, entity_id)
         return kwargs
