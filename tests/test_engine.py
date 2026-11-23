@@ -216,7 +216,7 @@ class Engine(unittest.TestCase):
                           metar_fallback=False)
         app._load_geometry_worker()
         self.assertIsNone(app._geometry)           # so the retry keeps trying and health says "loading"
-        self.assertIn("no usable outline for 3 of 3", app._last_geometry_refresh_error)
+        self.assertIn("usable for only 0 of the 3", app._last_geometry_refresh_error)
         app._run_poll_cycle_body()
         self.assertEqual(app.states["sensor.vatsim_feed_health"][1]["geometry_status"], "loading")
 
@@ -236,16 +236,94 @@ class Engine(unittest.TestCase):
         self.assertEqual(attrs["last_navdata_refresh_error_ts"], 123.0)
 
     def test_oversized_feed_text_is_cut(self):
-        limit = engine.MAX_FEED_TEXT_CHARS
+        limit = engine.MAX_FEED_TEXT_BYTES
         payload = {"atis": [{"callsign": "ZZAA_ATIS", "atis_code": "A", "frequency": "118.000",
                              "text_atis": ["X" * 9000, "Y" * 9000]}]}
         attrs = self.app._atis_attrs(payload, "ZZAA", "arrival")
         self.assertTrue(attrs["atis_online"])
-        self.assertEqual(len(attrs["atis_text"]), limit)
+        self.assertEqual(len(attrs["atis_text"]), limit - 2)     # the two quotes of the JSON string count
         self.app._publish_route_state(engine.RouteResolutionStatus.OK, "ZZAA", "ZZBB", "R" * 20000, 2, 0, True, True, force=True)
         route = self.app.states["sensor.vatsim_flight_route"][1]
-        self.assertEqual(len(route["raw_route"]), limit)
+        self.assertEqual(len(route["raw_route"]), limit - 2)
         self.assertLess(len(json.dumps(route)), 16384)           # under the recorder's attribute limit
+
+    def test_feed_text_is_capped_in_bytes_not_characters(self):
+        cap, limit = engine.VatsimAtcEngine._cap_feed_text, engine.MAX_FEED_TEXT_BYTES
+        size = lambda s: len(json.dumps(s, ensure_ascii=False).encode("utf-8"))
+        for hostile in ("\x00" * 20000, "\u00e9" * 20000, "\U0001F6EB" * 20000, '"\\' * 20000, "A\x00\u00e9" * 9000):
+            cut = cap(hostile)
+            self.assertLessEqual(size(cut), limit)
+            self.assertGreater(size(cut), limit * 0.8)            # cut to fit, not thrown away
+            self.assertTrue(hostile.startswith(cut))
+        self.assertEqual(cap("short"), "short")
+        self.assertIsNone(cap(None))
+        payload = {"atis": [{"callsign": "ZZAA_ATIS", "atis_code": "A", "text_atis": ["\x00" * 17000]}]}
+        attrs = self.app._atis_attrs(payload, "ZZAA", "arrival")
+        self.assertLess(len(json.dumps(attrs, ensure_ascii=False).encode("utf-8")), 16384)
+
+    def _load_with(self, features, dat):
+        def fetch(url, timeout, headers=None):
+            if url == a.BOUNDARIES_URL:
+                return json.dumps({"type": "FeatureCollection", "features": features})
+            return dat if url == a.DAT_URL else a.serve(url, self.payload)
+        app = make_engine(fetch=fetch, vatspy_boundaries_url=a.BOUNDARIES_URL, vatspy_dat_url=a.DAT_URL,
+                          metar_fallback=False)
+        app._load_geometry_worker()
+        return app
+
+    @staticmethod
+    def _world(good, empty, missing=0):
+        ids = [f"Z{n:03d}" for n in range(good + empty + missing)]
+        features = [{"type": "Feature", "properties": {"id": fid},
+                     "geometry": {"type": "Polygon", "coordinates": a.square(n, 0, n + 1, 1) if n < good else []}}
+                    for n, fid in enumerate(ids[:good + empty])]
+        dat = "[FIRs]\n" + "".join(f"{fid}|Name|{fid}|{fid}\n" for fid in ids)
+        return features, dat
+
+    def test_boundary_share_rule_at_its_edge(self):
+        self.assertIsNotNone(self._load_with(*self._world(50, 50))._geometry)      # exactly half: accepted
+        refused = self._load_with(*self._world(49, 51))
+        self.assertIsNone(refused._geometry)
+        self.assertIn("usable for only 49 of the 100", refused._last_geometry_refresh_error)
+
+    def test_boundaries_missing_from_the_download_count_against_it(self):
+        short = self._load_with(*self._world(1, 0, missing=99))     # one good shape, 99 referenced but absent
+        self.assertIsNone(short._geometry)
+        self.assertIn("usable for only 1 of the 100", short._last_geometry_refresh_error)
+        self.assertIsNotNone(self._load_with(*self._world(60, 0, missing=40))._geometry)
+
+    def test_acceptance_uses_the_real_boundary_parser(self):
+        geo = load("geo")
+        shapes = [{"type": "Polygon", "coordinates": [[None, None, None]]},
+                  {"type": "Polygon", "coordinates": [[[0, 0], [1, 1], [0, 0]]]},
+                  {"type": "MultiPolygon", "coordinates": [a.square(0, 0, 1, 1), [[None]]]},
+                  {"type": "MultiPolygon", "coordinates": [a.square(0, 0, 1, 1)]},
+                  {"type": "Polygon", "coordinates": a.square(0, 0, 1, 1)},
+                  {"type": "LineString", "coordinates": [[0, 0], [1, 1]]}, None]
+        for shape in shapes:
+            self.assertEqual(engine.VatsimAtcEngine._has_outline({"geometry": shape}),
+                             geo.boundary_from_geojson(shape) is not None, shape)
+        hollow = [{"type": "Feature", "properties": {"id": f"Z{n:03d}"}, "geometry": shapes[n % 2]} for n in range(4)]
+        dat = "[FIRs]\n" + "".join(f"Z{n:03d}|Name|Z{n:03d}|Z{n:03d}\n" for n in range(4))
+        self.assertIsNone(self._load_with(hollow, dat)._geometry)   # rings that are not outlines are refused
+
+    def test_a_failing_navdata_load_reaches_the_health_sensor(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            for name in ("earth_fix.dat", "earth_nav.dat"):
+                with open(os.path.join(folder, name), "w", encoding="utf-8") as fh:
+                    fh.write("10.0 20.0 FIXAA ENRT ZZ\n")
+            app = make_engine(fetch=self._fetch, vatspy_boundaries_url=a.BOUNDARIES_URL, vatspy_dat_url=a.DAT_URL,
+                              metar_fallback=False, navdata_path=folder)
+
+            def explode(*args, **kwargs):
+                raise OSError("disk gone")
+            app._parse_navdata_coord_file = explode
+            app._load_navdata_worker()
+        self.assertEqual(app._last_navdata_refresh_error, "OSError: disk gone")
+        app._load_geometry_worker()
+        app._run_poll_cycle_body()
+        self.assertEqual(app.states["sensor.vatsim_feed_health"][1]["last_navdata_refresh_error"], "OSError: disk gone")
 
     def test_host_contract_is_complete(self):
         used = {"log", "set_state", "get_state", "render_template", "call_service", "run_in", "run_every",

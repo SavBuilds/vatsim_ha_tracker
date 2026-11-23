@@ -499,6 +499,38 @@ automation:
                     for 5 min. Check the Home Assistant log for vatsim_atc.
     mode: single
 
+  - alias: "VATSIM: feed unreachable, recheck after a reload"
+    id: vatsim_feed_never_fetched_recheck
+    # Companion to the feed_never_fetched trigger in "VATSIM: feed unhealthy". A template
+    # trigger does not fire if it is already true when its automation is loaded, so reloading
+    # automations during such an outage would silence that alert for good. This waits the
+    # same 10 min after every reload and start, then checks once. It can repeat the other
+    # alert in the same outage; both carry the same tag, so the notification is replaced.
+    triggers:
+      - trigger: event
+        event_type: automation_reloaded
+      - trigger: homeassistant
+        event: start
+    actions:
+      - delay: "00:10:00"
+      - condition: template
+        value_template: >-
+          {% set h = 'sensor.vatsim_tracker_feed_health' %}
+          {{ states.sensor.vatsim_tracker_feed_health is not none
+             and state_attr(h, 'last_success_ts') | float(0) == 0
+             and state_attr(h, 'consecutive_failures') | int(0) > 0 }}
+      - action: script.vatsim_notify
+        data:
+          title: "VATSIM feed unreachable"
+          message: >-
+            The tracker has not fetched the VATSIM feed once since it started
+            ({{ state_attr('sensor.vatsim_tracker_feed_health','consecutive_failures') | int(0) }}
+            failures in a row). Nothing will show as connected until it does. Check
+            Home Assistant's network, then Settings > System > Logs for vatsim_atc.
+          tag: vatsim_tracker_outage
+    # restart: a second reload inside the 10 min starts the wait again, not a second check.
+    mode: restart
+
   - alias: "VATSIM: mute gate unavailable"
     id: vatsim_audio_gate_watchdog
     description: >-

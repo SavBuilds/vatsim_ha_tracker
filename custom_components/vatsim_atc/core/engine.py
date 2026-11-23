@@ -140,14 +140,15 @@ NAVDATA_CHANGE_CHECK_SECONDS = 3600
 # next attempt would be the scheduled refresh, which for boundaries is a week away.
 STARTUP_RETRY_FIRST_SECONDS = 120
 STARTUP_RETRY_INTERVAL_SECONDS = 300
-# A boundary download is refused when fewer than this share of the boundaries the FIR list
-# points at have a drawable outline. Real data is at or near 100 %; half is a deliberately
-# loose bar that still catches a download whose shapes are missing.
+# A boundary download is refused when fewer than this share of the distinct boundaries the
+# FIR list refers to are present with an outline the coverage code can use. Half is a
+# deliberately loose bar: it tolerates a FIR list that names some boundaries the file does
+# not carry, and still catches a truncated download or one whose shapes are missing.
 MIN_USABLE_BOUNDARY_SHARE = 0.5
-# Free text from the feed (an ATIS, a filed route) is cut at this length. Normal values are
-# far shorter. An oversized one would push a state's attributes past the recorder's 16 KB
-# limit, and the recorder then stores none of that state's attributes.
-MAX_FEED_TEXT_CHARS = 4000
+# Free text from the feed (an ATIS, a filed route) is cut to this many bytes as written in
+# JSON. Normal values are far shorter. An oversized one would push a state's attributes past
+# the recorder's 16 KB limit, and the recorder then stores none of that state's attributes.
+MAX_FEED_TEXT_BYTES = 4000
 _MONTHS = {m: i for i, m in enumerate(("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG",
                                        "SEP", "OCT", "NOV", "DEC"), start=1)}
 DEBOUNCE_THRESHOLD = 2  # consecutive polls required before publishing an identity change
@@ -866,6 +867,7 @@ class VatsimAtcEngine:
             f"Geometry snapshot swapped in (version={snapshot.version}, "
             f"vatspy_fir_prefixes={len(snapshot.ctr_raw.prefix_to_boundary_id)}, "
             f"vatspy_boundary_features={len(snapshot.ctr_raw.boundary_features_by_id)}, "
+            f"usable_boundaries={'/'.join(str(n) for n in getattr(self, '_usable_boundary_counts', ('?', '?')))}, "
             f"tracon_features={len(snapshot.tracon_features)}, "
             f"app_dep_status={self._compute_app_dep_status()}, "
             f"simaware_load_issues={snapshot.simaware_load_issue_count})"
@@ -897,14 +899,17 @@ class VatsimAtcEngine:
             raise ValueError("VATSpy FIR prefixes match none of the boundary ids")
         # Ids can all line up while the shapes are missing. That would also be a "ready"
         # snapshot in which nobody is ever covered, so it is refused the same way.
-        matched = {bid for ids in prefix_to_boundary_id.values() for bid in ids
-                   if bid in boundary_features_by_id}
-        usable = sum(1 for bid in matched if self._has_outline(boundary_features_by_id[bid]))
-        if usable < MIN_USABLE_BOUNDARY_SHARE * len(matched):
+        # Counted against every boundary the FIR list refers to, present or not, so a file
+        # that is merely short is caught as well as one whose shapes are empty.
+        referenced = {bid for ids in prefix_to_boundary_id.values() for bid in ids}
+        usable = sum(1 for bid in referenced
+                     if bid in boundary_features_by_id and self._has_outline(boundary_features_by_id[bid]))
+        if usable < MIN_USABLE_BOUNDARY_SHARE * len(referenced):
             raise ValueError(
-                f"VATSpy boundaries have no usable outline for {len(matched) - usable} of "
-                f"{len(matched)} FIRs"
+                f"VATSpy boundaries are usable for only {usable} of the {len(referenced)} "
+                f"boundaries the FIR list refers to"
             )
+        self._usable_boundary_counts = (usable, len(referenced))
 
         return VatspyRawData(
             prefix_to_boundary_id=prefix_to_boundary_id,
@@ -913,22 +918,35 @@ class VatsimAtcEngine:
 
     @staticmethod
     def _has_outline(feature: Any) -> bool:
-        """True if a GeoJSON feature has at least one ring of three or more points. A cheap
-        structural test, not a validity check: it exists to catch a download with no shapes."""
+        """True if the feature's geometry builds into a boundary. Uses the same parser as the
+        coverage lookups, so "accepted here" and "usable there" cannot disagree."""
         geometry = feature.get("geometry") if isinstance(feature, dict) else None
-        if not isinstance(geometry, dict):
+        try:
+            return geo.boundary_from_geojson(geometry) is not None
+        except Exception:
             return False
-        coordinates = geometry.get("coordinates")
-        if geometry.get("type") == "Polygon":
-            polygons = [coordinates]
-        elif geometry.get("type") == "MultiPolygon":
-            polygons = coordinates if isinstance(coordinates, list) else []
-        else:
-            return False
-        for polygon in polygons:
-            if isinstance(polygon, list) and polygon and isinstance(polygon[0], list) and len(polygon[0]) >= 3:
-                return True
-        return False
+
+    @staticmethod
+    def _cap_feed_text(text: Any) -> Any:
+        """Cut free text from the feed so that it stays under MAX_FEED_TEXT_BYTES once written
+        as JSON. Measured in serialized bytes, not characters: control characters and
+        non-ASCII text take several bytes each, and the recorder's limit is in bytes."""
+        if not isinstance(text, str):
+            return text
+        def size(candidate: str) -> int:
+            return len(json.dumps(candidate, ensure_ascii=False).encode("utf-8"))
+
+        text = text[:MAX_FEED_TEXT_BYTES]            # never more characters than bytes allowed
+        if size(text) <= MAX_FEED_TEXT_BYTES:
+            return text
+        low, high = 0, len(text)                     # longest prefix that fits
+        while low < high:
+            middle = (low + high + 1) // 2
+            if size(text[:middle]) <= MAX_FEED_TEXT_BYTES:
+                low = middle
+            else:
+                high = middle - 1
+        return text[:low]
 
     def _parse_vatspy_dat_firs(self, dat_text: str) -> Dict[str, Tuple[str, ...]]:
         prefix_to_boundary_ids: Dict[str, List[str]] = {}
@@ -2959,8 +2977,8 @@ class VatsimAtcEngine:
             "atis_callsign": (atis or {}).get("callsign"),
             "atis_code": ((atis or {}).get("atis_code") or None),
             "atis_frequency": (atis or {}).get("frequency"),
-            "atis_text": (" ".join(str(x) for x in text) if isinstance(text, list)
-                          else str(text))[:MAX_FEED_TEXT_CHARS],
+            "atis_text": self._cap_feed_text(" ".join(str(x) for x in text) if isinstance(text, list)
+                                             else str(text)),
             "atis_last_updated": (atis or {}).get("last_updated"),
         }
         if atis is not None:
@@ -3252,7 +3270,7 @@ class VatsimAtcEngine:
             "friendly_name": "VATSIM Flight Route",
             "departure": departure,
             "arrival": arrival,
-            "raw_route": raw_route[:MAX_FEED_TEXT_CHARS] if isinstance(raw_route, str) else raw_route,
+            "raw_route": self._cap_feed_text(raw_route),
             "resolved_waypoint_count": resolved_count,
             "unresolved_token_count": unresolved_count,
             "departure_airport_resolved": departure_resolved,
