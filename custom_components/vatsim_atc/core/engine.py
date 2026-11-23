@@ -936,7 +936,9 @@ class VatsimAtcEngine:
         def size(candidate: str) -> int:
             return len(json.dumps(candidate, ensure_ascii=False).encode("utf-8"))
 
-        text = text[:MAX_FEED_TEXT_BYTES]            # never more characters than bytes allowed
+        # A lone surrogate (valid in JSON, not in UTF-8) cannot be written to a state at all;
+        # it becomes "?" here so that one odd character cannot stop a publish.
+        text = text[:MAX_FEED_TEXT_BYTES].encode("utf-8", "replace").decode("utf-8")
         if size(text) <= MAX_FEED_TEXT_BYTES:
             return text
         low, high = 0, len(text)                     # longest prefix that fits

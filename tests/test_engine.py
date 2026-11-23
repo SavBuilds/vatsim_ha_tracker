@@ -257,6 +257,20 @@ class Engine(unittest.TestCase):
             self.assertTrue(hostile.startswith(cut))
         self.assertEqual(cap("short"), "short")
         self.assertIsNone(cap(None))
+
+    def test_a_lone_surrogate_in_feed_text_does_not_stop_a_publish(self):
+        cap, limit = engine.VatsimAtcEngine._cap_feed_text, engine.MAX_FEED_TEXT_BYTES
+        lone = json.loads('"\\ud800"')                      # valid JSON, not valid UTF-8
+        self.assertEqual(cap("WIND 270" + lone + " AT 10"), "WIND 270? AT 10")
+        for hostile in (lone * 20000, "A" * (limit - 3) + lone, ("A" + lone) * 9000):
+            cut = cap(hostile)
+            cut.encode("utf-8")                              # must be writable
+            self.assertLessEqual(len(json.dumps(cut, ensure_ascii=False).encode("utf-8")), limit)
+        payload = {"atis": [{"callsign": "ZZAA_ATIS", "atis_code": "A", "text_atis": ["INFO " + lone]}]}
+        self.assertEqual(self.app._atis_attrs(payload, "ZZAA", "arrival")["atis_text"], "INFO ?")
+        self.app._publish_route_state(engine.RouteResolutionStatus.OK, "ZZAA", "ZZBB", "DCT " + lone, 2, 0, True, True,
+                                      force=True)
+        self.assertEqual(self.app.states["sensor.vatsim_flight_route"][1]["raw_route"], "DCT ?")
         payload = {"atis": [{"callsign": "ZZAA_ATIS", "atis_code": "A", "text_atis": ["\x00" * 17000]}]}
         attrs = self.app._atis_attrs(payload, "ZZAA", "arrival")
         self.assertLess(len(json.dumps(attrs, ensure_ascii=False).encode("utf-8")), 16384)

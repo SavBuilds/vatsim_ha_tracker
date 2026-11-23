@@ -47,7 +47,7 @@ script:
       message:
         description: Notification text
       tag:
-        description: Optional. Pushes with the same tag replace each other (mobile app only)
+        description: Optional. Notices with the same tag replace each other
     sequence:
       # Default: a notice in the Home Assistant sidebar, which works on every
       # install. For your phone, change the action to notify.mobile_app_<device>.
@@ -55,8 +55,10 @@ script:
         data:
           title: "{{ title | default('VATSIM') }}"
           message: "{{ message }}"
-          # Mobile app only. Uncomment so repeat outage pushes replace each
-          # other and do not alert twice:
+          # A tagged notice replaces the earlier one with the same tag, so one outage
+          # does not stack up notices. This line is for the sidebar default above.
+          data: "{{ {'notification_id': tag} if tag is defined and tag else {} }}"
+          # For notify.mobile_app_<device>, use this line in its place:
           # data: "{{ {'tag': tag, 'alert_once': true} if tag is defined and tag else {} }}"
 
   # 4. SPEAKERS AND TTS ----------------------------------------------------
