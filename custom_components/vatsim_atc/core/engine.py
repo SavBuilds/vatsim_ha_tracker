@@ -140,6 +140,14 @@ NAVDATA_CHANGE_CHECK_SECONDS = 3600
 # next attempt would be the scheduled refresh, which for boundaries is a week away.
 STARTUP_RETRY_FIRST_SECONDS = 120
 STARTUP_RETRY_INTERVAL_SECONDS = 300
+# A boundary download is refused when fewer than this share of the boundaries the FIR list
+# points at have a drawable outline. Real data is at or near 100 %; half is a deliberately
+# loose bar that still catches a download whose shapes are missing.
+MIN_USABLE_BOUNDARY_SHARE = 0.5
+# Free text from the feed (an ATIS, a filed route) is cut at this length. Normal values are
+# far shorter. An oversized one would push a state's attributes past the recorder's 16 KB
+# limit, and the recorder then stores none of that state's attributes.
+MAX_FEED_TEXT_CHARS = 4000
 _MONTHS = {m: i for i, m in enumerate(("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG",
                                        "SEP", "OCT", "NOV", "DEC"), start=1)}
 DEBOUNCE_THRESHOLD = 2  # consecutive polls required before publishing an identity change
@@ -549,10 +557,12 @@ class VatsimAtcEngine:
         self._init_state()
         self._last_aircraft_attrs = self._load_last_aircraft()
 
-        self._start_geometry_worker("vatsim-geom-loader")
-
-        # Each periodic refresh first fires one full interval after start. The loads above and
-        # below are the initial ones; firing the refresh seconds later would repeat them.
+        # Every timer is scheduled before any loader thread is started, and a thread that
+        # cannot be started is logged, not raised. A failed start used to abort this method
+        # partway, leaving an entry that had set up successfully but never polled.
+        # Each periodic refresh first fires one full interval after start. The loads at the
+        # end of this method are the initial ones; firing the refresh seconds later would
+        # repeat them.
         self.run_every(
             self._schedule_geometry_refresh,
             self.datetime() + timedelta(seconds=self.geometry_refresh_interval_seconds),
@@ -565,7 +575,6 @@ class VatsimAtcEngine:
         )
 
         if self.navdata_path:
-            self._start_navdata_worker("vatsim-navdata-loader")
             self.run_every(
                 self._schedule_navdata_refresh,
                 self.datetime() + timedelta(seconds=self.navdata_refresh_interval_seconds),
@@ -584,9 +593,6 @@ class VatsimAtcEngine:
         # NAT tracks are only useful alongside local navdata, since a
         # track's named entry/exit points resolve against fix_coords.
         if self.navdata_path and self.nat_tracks_url:
-            threading.Thread(
-                target=self._load_nat_tracks_worker, daemon=True, name="vatsim-nat-loader"
-            ).start()
             self.run_every(
                 self._schedule_nat_track_refresh,
                 self.datetime() + timedelta(seconds=self.nat_track_refresh_interval_seconds),
@@ -598,6 +604,25 @@ class VatsimAtcEngine:
         self.listen_state(self._on_atis_override_change, ATIS_AIRPORT_OVERRIDE_ENTITY_ID)
 
         self.run_in(self._poll_cycle, 1)
+
+        # The initial loads. _retry_missing_loads covers boundaries and navdata if a start
+        # fails here; the NAT refresh timer covers the tracks.
+        self._start_geometry_worker("vatsim-geom-loader")
+        if self.navdata_path:
+            self._start_navdata_worker("vatsim-navdata-loader")
+            if self.nat_tracks_url:
+                self._start_loader_thread(self._load_nat_tracks_worker, "vatsim-nat-loader")
+
+    def _start_loader_thread(self, target, name: str) -> Optional[threading.Thread]:
+        """Start a daemon loader thread. Returns None, with a warning, if it cannot be started
+        (thread limits, memory): the caller's timers try again later."""
+        try:
+            thread = threading.Thread(target=target, daemon=True, name=name)
+            thread.start()
+            return thread
+        except Exception as exc:
+            self.log(f"Could not start {name}: {exc}; it will be tried again", level="WARNING")
+            return None
 
     def terminate(self) -> None:
         self._persist_last_aircraft(force=True)
@@ -784,8 +809,7 @@ class VatsimAtcEngine:
         thread = getattr(self, "_geometry_thread", None)
         if thread is not None and thread.is_alive():
             return
-        self._geometry_thread = threading.Thread(target=self._load_geometry_worker, daemon=True, name=name)
-        self._geometry_thread.start()
+        self._geometry_thread = self._start_loader_thread(self._load_geometry_worker, name)
 
     def _retry_missing_loads(self, kwargs) -> None:
         """Try again whatever is still not loaded. A start with no network yet, or one failed
@@ -871,11 +895,40 @@ class VatsimAtcEngine:
         if not any(bid in boundary_features_by_id
                    for ids in prefix_to_boundary_id.values() for bid in ids):
             raise ValueError("VATSpy FIR prefixes match none of the boundary ids")
+        # Ids can all line up while the shapes are missing. That would also be a "ready"
+        # snapshot in which nobody is ever covered, so it is refused the same way.
+        matched = {bid for ids in prefix_to_boundary_id.values() for bid in ids
+                   if bid in boundary_features_by_id}
+        usable = sum(1 for bid in matched if self._has_outline(boundary_features_by_id[bid]))
+        if usable < MIN_USABLE_BOUNDARY_SHARE * len(matched):
+            raise ValueError(
+                f"VATSpy boundaries have no usable outline for {len(matched) - usable} of "
+                f"{len(matched)} FIRs"
+            )
 
         return VatspyRawData(
             prefix_to_boundary_id=prefix_to_boundary_id,
             boundary_features_by_id=boundary_features_by_id,
         )
+
+    @staticmethod
+    def _has_outline(feature: Any) -> bool:
+        """True if a GeoJSON feature has at least one ring of three or more points. A cheap
+        structural test, not a validity check: it exists to catch a download with no shapes."""
+        geometry = feature.get("geometry") if isinstance(feature, dict) else None
+        if not isinstance(geometry, dict):
+            return False
+        coordinates = geometry.get("coordinates")
+        if geometry.get("type") == "Polygon":
+            polygons = [coordinates]
+        elif geometry.get("type") == "MultiPolygon":
+            polygons = coordinates if isinstance(coordinates, list) else []
+        else:
+            return False
+        for polygon in polygons:
+            if isinstance(polygon, list) and polygon and isinstance(polygon[0], list) and len(polygon[0]) >= 3:
+                return True
+        return False
 
     def _parse_vatspy_dat_firs(self, dat_text: str) -> Dict[str, Tuple[str, ...]]:
         prefix_to_boundary_ids: Dict[str, List[str]] = {}
@@ -1156,9 +1209,7 @@ class VatsimAtcEngine:
         self.run_in(self._apply_navdata_snapshot, 0, snapshot=snapshot)
 
     def _schedule_nat_track_refresh(self, kwargs) -> None:
-        threading.Thread(
-            target=self._load_nat_tracks_worker, daemon=True, name="vatsim-nat-refresh"
-        ).start()
+        self._start_loader_thread(self._load_nat_tracks_worker, "vatsim-nat-refresh")
 
     @staticmethod
     def _parse_nat_oceanic_point(token: str) -> Optional[Tuple[float, float]]:
@@ -1677,6 +1728,10 @@ class VatsimAtcEngine:
             "navdata_valid_until": self._navdata.valid_until if self._navdata else None,
             "navdata_snapshot_version": self._navdata.version if self._navdata else None,
             "navdata_load_issue_count": self._navdata.load_issue_count if self._navdata else 0,
+            # Set when a load or refresh failed and the previous snapshot (if any) was kept:
+            # navdata_status alone still reads "active" in that case.
+            "last_navdata_refresh_error": self._last_navdata_refresh_error,
+            "last_navdata_refresh_error_ts": self._last_navdata_refresh_error_ts,
             # NAT tracks. Surfaced separately from navdata because they go
             # stale on a scale of hours, not AIRAC cycles - an expired
             # snapshot draws a plausible but wrong oceanic line, so this
@@ -2904,7 +2959,8 @@ class VatsimAtcEngine:
             "atis_callsign": (atis or {}).get("callsign"),
             "atis_code": ((atis or {}).get("atis_code") or None),
             "atis_frequency": (atis or {}).get("frequency"),
-            "atis_text": " ".join(str(x) for x in text) if isinstance(text, list) else str(text),
+            "atis_text": (" ".join(str(x) for x in text) if isinstance(text, list)
+                          else str(text))[:MAX_FEED_TEXT_CHARS],
             "atis_last_updated": (atis or {}).get("last_updated"),
         }
         if atis is not None:
@@ -2932,8 +2988,8 @@ class VatsimAtcEngine:
         if (started is None or stuck) and now - self._metar_last_attempt.get(icao, 0.0) >= self.metar_refresh_seconds:
             self._metar_last_attempt[icao] = now
             self._metar_inflight[icao] = now
-            threading.Thread(target=self._fetch_metar_worker, args=(icao,), daemon=True,
-                             name=f"vatsim-metar-{icao}").start()
+            if self._start_loader_thread(lambda: self._fetch_metar_worker(icao), f"vatsim-metar-{icao}") is None:
+                self._metar_inflight.pop(icao, None)   # not running: let the next refresh try again
         entry = self._metar_cache.get(icao)
         if entry:
             basis = entry.get("observed_ts") or entry.get("fetched_at") or 0.0
@@ -3196,7 +3252,7 @@ class VatsimAtcEngine:
             "friendly_name": "VATSIM Flight Route",
             "departure": departure,
             "arrival": arrival,
-            "raw_route": raw_route,
+            "raw_route": raw_route[:MAX_FEED_TEXT_CHARS] if isinstance(raw_route, str) else raw_route,
             "resolved_waypoint_count": resolved_count,
             "unresolved_token_count": unresolved_count,
             "departure_airport_resolved": departure_resolved,

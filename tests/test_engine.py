@@ -179,6 +179,74 @@ class Engine(unittest.TestCase):
         self.assertEqual(calls.count(a.BOUNDARIES_URL), 1)
         self.assertIsNotNone(app._geometry)
 
+    def test_a_loader_that_cannot_start_does_not_stop_setup(self):
+        import threading
+        real = threading.Thread.start
+        started = []
+
+        def refuse(thread):
+            started.append(thread.name)
+            raise RuntimeError("can't start new thread")
+        threading.Thread.start = refuse
+        try:
+            app = make_engine(fetch=self._fetch, vatspy_boundaries_url=a.BOUNDARIES_URL, vatspy_dat_url=a.DAT_URL,
+                              metar_fallback=False, navdata_path=PACKAGE_DIR)
+            app.initialize()                       # must not raise
+        finally:
+            threading.Thread.start = real
+        names = [name for name, _delay in app.scheduled]
+        for needed in ("_poll_cycle", "_retry_missing_loads", "_schedule_geometry_refresh",
+                       "_schedule_navdata_refresh", "_schedule_nat_track_refresh"):
+            self.assertIn(needed, names)
+        self.assertEqual(sorted(started), ["vatsim-geom-loader", "vatsim-nat-loader", "vatsim-navdata-loader"])
+        self.assertEqual(sum("Could not start" in m for _l, m in app.logs), 3)
+        self.assertFalse(app._navdata_loading)     # a failed start must not block the retry
+        app._retry_missing_loads({})               # and the retry then loads the boundaries
+        app._geometry_thread.join(10)
+        self.assertIsNotNone(app._geometry)
+
+    def test_boundaries_with_no_shapes_are_refused(self):
+        hollow = {"type": "FeatureCollection", "features": [
+            {"type": "Feature", "properties": {"id": fid}, "geometry": {"type": "Polygon", "coordinates": []}}
+            for fid in ("ZZAA", "ZZBB", "ZZCC")]}
+
+        def fetch(url, timeout, headers=None):
+            return json.dumps(hollow) if url == a.BOUNDARIES_URL else a.serve(url, self.payload)
+        app = make_engine(fetch=fetch, vatspy_boundaries_url=a.BOUNDARIES_URL, vatspy_dat_url=a.DAT_URL,
+                          metar_fallback=False)
+        app._load_geometry_worker()
+        self.assertIsNone(app._geometry)           # so the retry keeps trying and health says "loading"
+        self.assertIn("no usable outline for 3 of 3", app._last_geometry_refresh_error)
+        app._run_poll_cycle_body()
+        self.assertEqual(app.states["sensor.vatsim_feed_health"][1]["geometry_status"], "loading")
+
+    def test_one_bad_shape_among_good_ones_is_accepted(self):
+        self.assertIsNotNone(self.app._geometry)   # the fixture has 1 empty outline in 3
+        self.assertTrue(engine.VatsimAtcEngine._has_outline(a.BOUNDARIES["features"][0]))
+        self.assertTrue(engine.VatsimAtcEngine._has_outline(a.BOUNDARIES["features"][1]))
+        self.assertFalse(engine.VatsimAtcEngine._has_outline(a.BOUNDARIES["features"][2]))
+        self.assertFalse(engine.VatsimAtcEngine._has_outline({"geometry": None}))
+
+    def test_navdata_refresh_error_is_published(self):
+        self.app._last_navdata_refresh_error = "OSError: disk gone"
+        self.app._last_navdata_refresh_error_ts = 123.0
+        self.poll()
+        attrs = self.app.states["sensor.vatsim_feed_health"][1]
+        self.assertEqual(attrs["last_navdata_refresh_error"], "OSError: disk gone")
+        self.assertEqual(attrs["last_navdata_refresh_error_ts"], 123.0)
+
+    def test_oversized_feed_text_is_cut(self):
+        limit = engine.MAX_FEED_TEXT_CHARS
+        payload = {"atis": [{"callsign": "ZZAA_ATIS", "atis_code": "A", "frequency": "118.000",
+                             "text_atis": ["X" * 9000, "Y" * 9000]}]}
+        attrs = self.app._atis_attrs(payload, "ZZAA", "arrival")
+        self.assertTrue(attrs["atis_online"])
+        self.assertEqual(len(attrs["atis_text"]), limit)
+        self.app._publish_route_state(engine.RouteResolutionStatus.OK, "ZZAA", "ZZBB", "R" * 20000, 2, 0, True, True, force=True)
+        route = self.app.states["sensor.vatsim_flight_route"][1]
+        self.assertEqual(len(route["raw_route"]), limit)
+        self.assertLess(len(json.dumps(route)), 16384)           # under the recorder's attribute limit
+
     def test_host_contract_is_complete(self):
         used = {"log", "set_state", "get_state", "render_template", "call_service", "run_in", "run_every",
                 "listen_state", "datetime", "http_get"}

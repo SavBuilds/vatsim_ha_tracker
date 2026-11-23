@@ -365,6 +365,19 @@ automation:
              and as_timestamp(now()) - as_timestamp(fh.last_updated) < 150 }}
         for: "00:02:00"
         id: feed_stale
+      # No successful fetch at all since the tracker started. feed_stale cannot see this: it
+      # needs a last success to measure from, and its connected-pilot gate can never open,
+      # because a tracker with no feed cannot know you are connected. Fires once, after
+      # 10 min of nothing but failures. last_success_ts and a zero failure count are absent
+      # from the state, so float(0) and int(0) restore them.
+      - trigger: template
+        value_template: >-
+          {% set h = 'sensor.vatsim_tracker_feed_health' %}
+          {{ states.sensor.vatsim_tracker_feed_health is not none
+             and state_attr(h, 'last_success_ts') | float(0) == 0
+             and state_attr(h, 'consecutive_failures') | int(0) > 0 }}
+        for: "00:10:00"
+        id: feed_never_fetched
       # Navdata parsed partially or not at all. Correct value is 0, and 0 is
       # dropped from the published state entirely (the
       # attribute is absent while healthy), so int(0) restores the intended sense.
@@ -422,6 +435,20 @@ automation:
                     reloads within an hour.{% else %}Navdata loaded with
                     {{ state_attr(h,'navdata_load_issue_count') | int(0) }}
                     issues (status: {{ state_attr(h,'navdata_status') }}).{% set e = state_attr(h,'last_navdata_refresh_error') %}{{ ' ' ~ (e | string)[:300] if e else '' }}{% endif %}
+          # Not gated on a connected pilot: with no feed the tracker cannot see one.
+          - conditions:
+              - condition: trigger
+                id: feed_never_fetched
+            sequence:
+              - action: script.vatsim_notify
+                data:
+                  title: "VATSIM feed unreachable"
+                  message: >-
+                    The tracker has not fetched the VATSIM feed once since it started
+                    ({{ state_attr('sensor.vatsim_tracker_feed_health','consecutive_failures') | int(0) }}
+                    failures in a row). Nothing will show as connected until it does. Check
+                    Home Assistant's network, then Settings > System > Logs for vatsim_atc.
+                  tag: vatsim_tracker_outage
           # Feed stale: gated on an active session to avoid idle-hours noise.
           # Deliberately conservative, a tracker that dies while you are not
           # flying will not page you.

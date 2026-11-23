@@ -6,7 +6,7 @@ It is a custom integration: one install, one setup dialog that asks for your VAT
 
 Needs Home Assistant 2026.10 or later.
 
-**Status: beta (2.0.0b4).** Version 2 is a rewrite of this project as a Home Assistant integration. The tracking logic is the same as version 1, the AppDaemon app, and was compared against it on live data. The Home Assistant side is new. Expect rough edges and please report them.
+**Status: beta (2.0.0b5).** Version 2 is a rewrite of this project as a Home Assistant integration. The tracking logic is the same as version 1, the AppDaemon app, and was compared against it on live data. The Home Assistant side is new. Expect rough edges and please report them.
 
 ![The dashboard in flight](docs/images/dashboard_main.png)
 
@@ -75,11 +75,12 @@ Both are set under the integration's **Configure** button. Paths are as Home Ass
 - Otherwise: copy the same four files from your own X-Plane 12 installation.
 - Then set the navigation data folder to, for example, `/config/vatsim/navdata`.
 
-**Approach and departure boundaries.** Build one file from the SimAware TRACON Project on any PC with Python:
+**Approach and departure boundaries.** Build one file from the SimAware TRACON Project on any PC with Python and git. The build script is in this repository, not in what HACS installs, so clone both, side by side:
 
 ```
+git clone https://github.com/SavBuilds/vatsim_ha_tracker
 git clone https://github.com/vatsimnetwork/simaware-tracon-project
-python tools/build_simaware.py simaware-tracon-project TRACONBoundaries.geojson
+python vatsim_ha_tracker/tools/build_simaware.py simaware-tracon-project TRACONBoundaries.geojson
 ```
 
 Copy `TRACONBoundaries.geojson` to your config share, for example `vatsim/simaware/`, and set the SimAware path to `/config/vatsim/simaware/TRACONBoundaries.geojson`.
