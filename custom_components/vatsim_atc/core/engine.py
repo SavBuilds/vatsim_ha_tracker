@@ -906,10 +906,12 @@ class VatsimAtcEngine:
 
             existing = prefix_to_boundary_ids.setdefault(prefix, [])
             if existing:
+                # A normal property of the published data, handled at poll time. Not a warning:
+                # it would otherwise be logged on every load, for every user.
                 self.log(f"VATSpy prefix '{prefix}' maps to multiple distinct boundary "
                          f"ids ({', '.join(existing)}, '{boundary_id}'); keeping all as "
                          f"candidates for covers()-based resolution at poll time",
-                         level="WARNING")
+                         level="INFO")
             existing.append(boundary_id)
 
         return {prefix: tuple(ids) for prefix, ids in prefix_to_boundary_ids.items()}
