@@ -6,7 +6,7 @@ It is a custom integration: one install, one setup dialog that asks for your VAT
 
 Needs Home Assistant 2026.10 or later.
 
-**Status: beta (2.0.0b7).** Version 2 is a rewrite of this project as a Home Assistant integration. The tracking logic is the same as version 1, the AppDaemon app, and was compared against it on live data. The Home Assistant side is new. Expect rough edges and please report them.
+**Status: beta (2.0.0b8).** Version 2 is a rewrite of this project as a Home Assistant integration. The tracking logic is the same as version 1, the AppDaemon app, and was compared against it on live data. The Home Assistant side is new. Expect rough edges and please report them.
 
 ![The dashboard in flight](docs/images/dashboard_main.png)
 
@@ -42,6 +42,7 @@ Needs Home Assistant 2026.10 or later.
 
 **Health**
 - One diagnostic sensor reports feed age, the state of boundaries, navigation data and NAT tracks, the navigation data cycle and its expiry, and the last errors. Everything fails soft and says so there.
+- Problems you should know about are raised as **Repairs** (Settings > System > Repairs) with no setup: the feed cannot be reached or has gone stale, the tracker has stopped, sector boundaries or navigation data did not load, navigation data has expired. Each one says what to check and clears itself when the problem is gone.
 
 ---
 
@@ -153,6 +154,7 @@ On a new install the "aircraft position missing" watchdog reports before your fi
 
 ## Troubleshooting
 
+- **A repair named "VATSIM ..." appeared.** Open it: it says what is wrong and what to check, and it disappears by itself once fixed.
 - **Feed health is not `healthy`.** Open the entity: the attributes name what is wrong and carry the last error text.
 - **No route line.** `navdata_status` on the feed health sensor says whether navigation data is `active`, `disabled` (no folder set), `configured_but_empty` (the folder holds none of the four files) or `expired`.
 - **An approach controller alone reads as uncontrolled.** `app_dep_status` is not `active`: no SimAware file is set, or it could not be read.

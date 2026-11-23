@@ -107,6 +107,25 @@ def install():
     _module("homeassistant.helpers.device_registry", DeviceInfo=dict,
             DeviceEntryType=enum.Enum("DeviceEntryType", "SERVICE"))
     _module("homeassistant.helpers.entity", Entity=Entity)
+
+    def create_issue(hass, domain, issue_id, **details):
+        assert asyncio.get_running_loop() is hass.loop, "issue raised off the loop"
+        placeholders = details.get("translation_placeholders")
+        assert placeholders is None or all(isinstance(v, str) for v in placeholders.values())
+        hass.issues[(domain, issue_id)] = details
+
+    def delete_issue(hass, domain, issue_id):
+        assert asyncio.get_running_loop() is hass.loop, "issue cleared off the loop"
+        hass.issues.pop((domain, issue_id), None)
+
+    _module("homeassistant.helpers.issue_registry", async_create_issue=create_issue,
+            async_delete_issue=delete_issue, IssueSeverity=enum.Enum("IssueSeverity", "CRITICAL ERROR WARNING"))
+
+    def track_interval(hass, action, interval):
+        hass.intervals.append((action, interval))
+        return lambda: hass.intervals.remove((action, interval))
+
+    _module("homeassistant.helpers.event", async_track_time_interval=track_interval)
     _module("homeassistant.helpers.entity_platform", AddEntitiesCallback=object)
     _module("homeassistant.helpers.restore_state", RestoreEntity=RestoreEntity)
     _module("homeassistant.components")

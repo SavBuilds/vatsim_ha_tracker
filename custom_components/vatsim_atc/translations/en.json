@@ -35,22 +35,72 @@
   },
   "entity": {
     "binary_sensor": {
-      "pilot_connected": { "name": "Pilot connected" },
-      "atc_coverage": { "name": "ATC coverage" }
+      "pilot_connected": {
+        "name": "Pilot connected"
+      },
+      "atc_coverage": {
+        "name": "ATC coverage"
+      }
     },
     "device_tracker": {
-      "aircraft": { "name": "Aircraft" }
+      "aircraft": {
+        "name": "Aircraft"
+      }
     },
     "sensor": {
-      "feed_health": { "name": "Feed health" },
-      "next_sector": { "name": "Next sector" },
-      "destination": { "name": "Destination" },
-      "online_atc_boundaries": { "name": "Online ATC boundaries" },
-      "flight_route": { "name": "Flight route" },
-      "session_track": { "name": "Session track" }
+      "feed_health": {
+        "name": "Feed health"
+      },
+      "next_sector": {
+        "name": "Next sector"
+      },
+      "destination": {
+        "name": "Destination"
+      },
+      "online_atc_boundaries": {
+        "name": "Online ATC boundaries"
+      },
+      "flight_route": {
+        "name": "Flight route"
+      },
+      "session_track": {
+        "name": "Session track"
+      }
     },
     "text": {
-      "atis_airport": { "name": "ATIS airport" }
+      "atis_airport": {
+        "name": "ATIS airport"
+      }
+    }
+  },
+  "issues": {
+    "feed_unreachable": {
+      "title": "VATSIM feed has not been reachable since the tracker started",
+      "description": "The tracker has not downloaded the VATSIM data feed once since it started, and has been trying for at least 10 minutes. Until it does, nothing shows as connected and no alert can fire.\n\nCheck that Home Assistant can reach the internet (the feed is at data.vatsim.net). The exact error is under Settings > System > Logs, search for vatsim_atc.\n\nThis clears by itself after the first successful download."
+    },
+    "feed_stale": {
+      "title": "VATSIM feed is not updating",
+      "description": "The tracker's last successful download of the VATSIM data feed is too old: more than 3 minutes while you are connected to VATSIM, or more than 15 minutes otherwise. Position, coverage and alerts are frozen at the last good data.\n\nCheck Home Assistant's internet connection, and whether VATSIM itself is having an outage. The exact error is under Settings > System > Logs, search for vatsim_atc.\n\nThis clears by itself when downloads work again."
+    },
+    "tracker_stalled": {
+      "title": "VATSIM tracker has stopped publishing",
+      "description": "The tracker has published nothing for more than 5 minutes, so every VATSIM entity is frozen.\n\nReload the integration (Settings > Devices & services > VATSIM ATC Tracker > three-dot menu > Reload). If it happens again, please report it with the log lines for vatsim_atc from Settings > System > Logs.\n\nThis clears by itself when the tracker publishes again."
+    },
+    "processing_error": {
+      "title": "VATSIM tracker cannot process the feed",
+      "description": "The feed downloads, but the tracker has failed to process it for at least 5 minutes. Entities are not being updated.\n\nThis is a fault in the integration, not in your setup. Please report it with the traceback for vatsim_atc from Settings > System > Logs.\n\nThis clears by itself when processing works again."
+    },
+    "boundaries_not_loaded": {
+      "title": "VATSIM sector boundaries are not loaded",
+      "description": "The tracker has no usable sector boundaries, so ATC coverage reads as uncontrolled and the coverage and lookahead alerts cannot fire. It retries every 5 minutes.\n\nLast error: {error}\n\nThe boundaries come from the VAT-Spy Client Data Update Project on GitHub. Check that Home Assistant can reach raw.githubusercontent.com.\n\nThis clears by itself when a download succeeds."
+    },
+    "navdata_not_loaded": {
+      "title": "VATSIM navigation data did not load completely",
+      "description": "A navigation data folder is set, but the data did not load completely (status: {status}). The filed route line may be missing or incomplete.\n\nLast error: {error}\n\nCheck the folder under the integration's Configure button. It needs the X-Plane 12 files earth_fix.dat, earth_nav.dat, earth_awy.dat and earth_aptmeta.dat, and the path must be as Home Assistant sees it, for example /config/vatsim/navdata.\n\nThis clears by itself when the data loads; changed files are noticed within the hour."
+    },
+    "navdata_expired": {
+      "title": "VATSIM navigation data has expired",
+      "description": "The navigation data in use is AIRAC cycle {cycle}, valid until {valid_until}. The route line may use fixes or airways that have since changed.\n\nUpdate the files in the navigation data folder. The integration notices changed files within the hour.\n\nThis clears by itself when newer data loads."
     }
   }
 }

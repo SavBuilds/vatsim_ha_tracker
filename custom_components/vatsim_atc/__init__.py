@@ -16,6 +16,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .const import DOMAIN, USER_AGENT, engine_args, signal_for
 from .host import Tracker
+from .issues import IssueReporter
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,6 +61,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: VatsimConfigEntry) -> bo
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     tracker.start()
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+
+    # Repairs issues for things the user should know about (feed unreachable, boundaries or
+    # navigation data not loaded, ...). Stopped and cleared when the entry unloads.
+    reporter = IssueReporter(hass, entry, tracker)
+    reporter.start()
+    entry.async_on_unload(reporter.stop)
 
     async def on_stop(event: Event) -> None:
         # Entries are not unloaded when Home Assistant stops. Without this the worker could

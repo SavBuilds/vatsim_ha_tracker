@@ -50,6 +50,7 @@ class _Session:
 class _Hass:
     def __init__(self, loop, folder):
         self.loop, self.session, self.entities, self.stop_listeners = loop, _Session(), [], []
+        self.issues, self.intervals = {}, []
         outer = self
         self.config = type("C", (), {"path": staticmethod(lambda *p: os.path.join(folder, *p))})()
         self.bus = type("B", (), {"async_listen_once": staticmethod(
@@ -152,6 +153,57 @@ class Glue(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(os.path.exists(saved))
         await integration.async_remove_entry(self.hass, self.entry)
         self.assertFalse(os.path.exists(saved))
+
+    async def test_problems_become_repairs_issues_and_clear_again(self):
+        issues_mod = importlib.import_module("custom_components.vatsim_atc.issues")
+        problems = importlib.import_module("custom_components.vatsim_atc.core.problems")
+        severity = sys.modules["homeassistant.helpers.issue_registry"].IssueSeverity
+        self.assertEqual(len(self.hass.intervals), 1)                     # the reporter's timer is running
+        check, interval = self.hass.intervals[0]
+        self.assertEqual(interval.total_seconds(), 30)
+        tracker = self.entry.runtime_data
+        self.assertTrue(await until(lambda: tracker.published.get("sensor.vatsim_feed_health", (None,))[0] == "healthy"))
+        check()
+        self.assertEqual(self.hass.issues, {})                            # healthy: nothing raised
+
+        real_time, clock = issues_mod.time, type("Clock", (), {"offset": 0.0})()
+        clock.time = lambda: real_time.time() + clock.offset
+        issues_mod.time = clock
+        try:
+            # Boundaries lost, and navigation data expired, as the engine would publish them.
+            state, attrs = tracker.published["sensor.vatsim_feed_health"]
+            broken = dict(attrs, geometry_status="loading", last_geometry_refresh_error="OSError: no route",
+                          navdata_status="expired", navdata_cycle="2001", navdata_valid_until="2020-01-29")
+            freeze = tracker.set_state
+            tracker.set_state = lambda *a_, **k: None                     # hold the engine's own publishes off
+            tracker.published = {**tracker.published, "sensor.vatsim_feed_health": (state, broken)}
+            check()
+            self.assertEqual(list(self.hass.issues), [("vatsim_atc", "navdata_expired_entry1")])   # no hold on this one
+            expired = self.hass.issues[("vatsim_atc", "navdata_expired_entry1")]
+            self.assertEqual(expired["translation_key"], "navdata_expired")
+            self.assertEqual(expired["translation_placeholders"], {"cycle": "2001", "valid_until": "2020-01-29"})
+            self.assertEqual((expired["is_fixable"], expired["is_persistent"], expired["severity"]),
+                             (False, False, severity.WARNING))
+            clock.offset = problems.HOLD_BOUNDARIES + 1
+            tracker.last_publish = clock.time()
+            broken["last_success_ts"] = clock.time()
+            check()
+            boundaries = self.hass.issues[("vatsim_atc", "boundaries_not_loaded_entry1")]
+            self.assertEqual(boundaries["translation_placeholders"], {"error": "OSError: no route"})
+            # The engine goes quiet: only that is reported, as an error.
+            clock.offset += problems.STALLED_SECONDS + 1
+            check()
+            self.assertEqual(list(self.hass.issues), [("vatsim_atc", "tracker_stalled_entry1")])
+            stalled = self.hass.issues[("vatsim_atc", "tracker_stalled_entry1")]
+            self.assertEqual((stalled["severity"], stalled["translation_placeholders"]), (severity.ERROR, None))
+            # Unloading clears whatever is raised and stops the timer.
+            for stop in self.entry.unload_callbacks:
+                stop()
+            self.assertEqual(self.hass.issues, {})
+            self.assertEqual(self.hass.intervals, [])
+            tracker.set_state = freeze
+        finally:
+            issues_mod.time = real_time
 
     async def test_restored_airport_is_sanitised(self):
         text = importlib.import_module("custom_components.vatsim_atc.text")
