@@ -1,7 +1,7 @@
 """Constants for the VATSIM ATC Tracker integration. No Home Assistant imports."""
 
 DOMAIN = "vatsim_atc"
-VERSION = "2.0.0b9"
+VERSION = "2.0.0b10"
 PROJECT_URL = "https://github.com/SavBuilds/vatsim_ha_tracker"
 USER_AGENT = f"vatsim_ha_tracker/{VERSION} (+{PROJECT_URL})"
 
