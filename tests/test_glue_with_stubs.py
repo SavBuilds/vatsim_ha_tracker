@@ -201,6 +201,9 @@ class Glue(unittest.IsolatedAsyncioTestCase):
             # reported stays, with no second notice for it.
             del self.hass.issue_events[:]
             clock.offset += problems.STALLED_SECONDS + 1
+            check()                                                       # one quiet reading changes nothing
+            self.assertEqual(self.hass.issue_events, [])
+            clock.offset += 30
             check()
             self.assertEqual(sorted(k for _, k in self.hass.issues), [
                 "boundaries_not_loaded_entry1", "navdata_expired_entry1", "tracker_stalled_entry1"])

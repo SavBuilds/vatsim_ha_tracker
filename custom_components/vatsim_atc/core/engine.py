@@ -1782,8 +1782,10 @@ class VatsimAtcEngine:
         }
         snapshot = (health.value, tuple(sorted(attrs.items())))
         if snapshot != self._last_feed_health_published:
-            self._last_feed_health_published = snapshot
             self.set_state("sensor.vatsim_feed_health", state=health.value, attributes=attrs)
+            # Remembered only once the write worked. Remembered first, a write that failed
+            # would never be tried again while the health stayed the same.
+            self._last_feed_health_published = snapshot
         # Only here, after everything above worked: an unchanged health still counts as a
         # check, a health report that raised does not.
         self.last_health_check = time.monotonic()

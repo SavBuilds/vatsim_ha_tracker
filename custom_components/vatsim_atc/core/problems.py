@@ -8,7 +8,9 @@ A problem is reported only after its condition has held for a while, so a slow s
 missed download does not raise anything.
 
 Every time here is on the caller's monotonic clock (time.monotonic()), never the wall clock:
-a clock correction or a resume from suspend must not raise or hide anything.
+a clock correction must not raise or hide anything, and a resume from suspend must not raise
+anything. On Linux that clock stands still while the machine is suspended, so time spent
+suspended does not count toward a hold either.
 """
 from __future__ import annotations
 
@@ -66,6 +68,7 @@ class ProblemWatch:
         self._since: Dict[str, float] = {}
         self._success_seen: Tuple[float, float] = (0.0, started)   # (last_success_ts, when it changed)
         self._active: Dict[str, Dict[str, str]] = {}
+        self._quiet_before = False
 
     def _held(self, key: str, condition: bool, now: float, hold: float) -> bool:
         if not condition:
@@ -83,7 +86,14 @@ class ProblemWatch:
         being published does not count, or a fault in the health report itself would be hidden.
         """
         quiet_for = now - (last_health_check if last_health_check is not None else self._started)
-        if quiet_for > STALLED_SECONDS:
+        quiet, quiet_before = quiet_for > STALLED_SECONDS, self._quiet_before
+        self._quiet_before = quiet
+        if quiet and not quiet_before:
+            # The caller reads the health and the time of its last check one after the other,
+            # from another thread, and can catch the moment between the two being written.
+            # One quiet reading changes nothing; the next check, 30 s on, settles it.
+            return dict(self._active)
+        if quiet:
             # What was last published is stale, so nothing can be judged from it. Problems
             # already reported stay as they are: clearing them here and raising them again
             # afterwards would notify twice for one fault.

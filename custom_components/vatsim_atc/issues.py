@@ -27,7 +27,8 @@ PILOT_CONNECTED = "binary_sensor.vatsim_pilot_connected"
 class IssueReporter:
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, tracker: Tracker) -> None:
         self._hass, self._entry, self._tracker = hass, entry, tracker
-        # Monotonic, so a clock correction or a resume from suspend cannot raise or hide anything.
+        # Monotonic, so a clock correction cannot raise or hide anything and a resume from
+        # suspend cannot raise anything.
         self._watch = ProblemWatch(started=time.monotonic())
         self._raised: Dict[str, Tuple[Tuple[str, str], ...]] = {}
         self._unsubscribe: Optional[Callable[[], None]] = None

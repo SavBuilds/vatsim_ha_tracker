@@ -38,7 +38,20 @@ class Rules(unittest.TestCase):
 
     def test_nothing_is_reported_before_the_first_health_check_until_the_grace_time_is_up(self):
         self.assertEqual(self.watch.evaluate(T0 + 299, None, False, None), {})
-        self.assertEqual(self.watch.evaluate(T0 + 301, None, False, None), {problems.TRACKER_STALLED: {}})
+        self.assertEqual(self.watch.evaluate(T0 + 301, None, False, None), {})     # one quiet reading
+        self.assertEqual(self.watch.evaluate(T0 + 331, None, False, None), {problems.TRACKER_STALLED: {}})
+
+    def test_one_quiet_reading_is_not_a_stopped_tracker(self):
+        # R20: the reporter can read fresh health together with the time of the check before
+        # it. That lasts an instant, so a stall counts only when two checks in a row see it.
+        expired = dict(HEALTHY, navdata_status="expired", navdata_cycle="2001", navdata_valid_until="2020-01-29")
+        before = self.run_for(60, expired)
+        now = T0 + 5000
+        self.assertEqual(self.watch.evaluate(now, ("healthy", expired), False, now - 301), before)
+        fresh = dict(expired, last_success_ts=WALL + 1)
+        self.assertEqual(self.watch.evaluate(now + 30, ("healthy", fresh), False, now + 30), before)
+        self.assertEqual(self.watch.evaluate(now + 60, ("healthy", fresh), False, now - 301), before)
+        self.assertIn(problems.TRACKER_STALLED, self.watch.evaluate(now + 90, ("healthy", fresh), False, now - 301))
 
     def test_feed_unreachable_needs_ten_minutes_of_nothing_but_failures(self):
         failing = {"consecutive_failures": 3, "geometry_status": "ready"}     # no last_success_ts at all
@@ -82,7 +95,8 @@ class Rules(unittest.TestCase):
         before = self.run_for(60, expired)
         self.assertEqual(list(before), [problems.NAVDATA_EXPIRED])
         now = T0 + 5000
-        during = self.watch.evaluate(now, ("healthy", expired), False, now - problems.STALLED_SECONDS - 1)
+        for at in (now - 30, now):
+            during = self.watch.evaluate(at, ("healthy", expired), False, now - 30 - problems.STALLED_SECONDS - 1)
         self.assertEqual(during, {**before, problems.TRACKER_STALLED: {}})
         after = self.watch.evaluate(now + 30, ("healthy", dict(expired, last_success_ts=WALL + 1)), False, now + 30)
         self.assertEqual(after, before)
@@ -91,16 +105,18 @@ class Rules(unittest.TestCase):
         loading = dict(HEALTHY, geometry_status="loading", last_geometry_refresh_error="X")
         self.run_for(60, loading)                                              # inside its hold
         now = T0 + 5000
-        self.assertEqual(self.watch.evaluate(now, ("healthy", loading), True, now - problems.STALLED_SECONDS - 1),
-                         {problems.TRACKER_STALLED: {}})
+        for at in (now - 30, now):
+            stalled = self.watch.evaluate(at, ("healthy", loading), True, now - 30 - problems.STALLED_SECONDS - 1)
+        self.assertEqual(stalled, {problems.TRACKER_STALLED: {}})
 
     def test_health_that_is_never_checked_is_a_stopped_tracker_whatever_else_is_published(self):
         # R14: the caller passes the engine's health heartbeat, not the time of any publish.
         # With health absent and the heartbeat absent, the grace time ends in a report.
+        self.watch.evaluate(T0 + 3570, None, True, None)
         self.assertEqual(self.watch.evaluate(T0 + 3600, None, True, None), {problems.TRACKER_STALLED: {}})
         # With health present but its heartbeat old, the same.
         self.assertIn(problems.TRACKER_STALLED,
-                      self.watch.evaluate(T0 + 3600, ("healthy", HEALTHY), True, T0 + 3600 - 301))
+                      self.watch.evaluate(T0 + 3630, ("healthy", HEALTHY), True, T0 + 3600 - 301))
 
     def test_failures_need_five_minutes(self):
         cases = ((problems.PROCESSING_ERROR, dict(HEALTHY, timestamp_status="processing_error")),
@@ -133,6 +149,12 @@ class Rules(unittest.TestCase):
         failed = dict(loading, last_geometry_refresh_error="FetchError: down")
         self.assertEqual(self.run_for(270, failed, start=630), {})
         self.assertEqual(list(self.run_for(30, failed, start=930)), [problems.BOUNDARIES_NOT_LOADED])
+        self.watch = problems.ProblemWatch(started=T0)                         # and the same for navdata
+        loading = dict(HEALTHY, navdata_status="configured_but_unloaded")
+        self.assertEqual(self.run_for(600, loading), {})
+        failed = dict(loading, last_navdata_refresh_error="OSError: gone")
+        self.assertEqual(self.run_for(270, failed, start=630), {})
+        self.assertEqual(list(self.run_for(30, failed, start=930)), [problems.NAVDATA_NOT_LOADED])
 
     def test_a_failed_navdata_reload_is_reported_while_the_older_data_stays_active(self):
         # R17: status "active", no load issues, but the reload raised.
@@ -197,6 +219,43 @@ class EngineHeartbeat(unittest.TestCase):
         self.assertIsNone(app.last_health_check)
 
 
+class EngineHealthWrites(unittest.TestCase):
+    def setUp(self):
+        from _harness import make_engine
+        self.engine_mod = load("core.engine")
+        self.app = make_engine()
+
+    def test_a_health_write_that_failed_is_tried_again_and_is_not_a_finished_check(self):
+        # R23: the health was remembered as published before the write, so with unchanged
+        # health the write was never retried while the heartbeat kept moving.
+        app, health = self.app, self.engine_mod.FeedHealth.DEGRADED
+        real, attempts = app.set_state, []
+
+        def failing(entity_id, **kwargs):
+            attempts.append(entity_id)
+            raise OSError("write refused")
+        app.set_state = failing
+        for _ in range(3):
+            with self.assertRaises(OSError):
+                app._publish_feed_health(health, 1000.0, timestamp_status="processing_error")
+        self.assertEqual(len(attempts), 3)                    # every check tries again
+        self.assertIsNone(app.last_health_check)              # and none of them counts
+        app.set_state = real
+        app._publish_feed_health(health, 1000.0, timestamp_status="processing_error")
+        self.assertEqual(app.states["sensor.vatsim_feed_health"][0], health.value)
+        self.assertIsNotNone(app.last_health_check)
+
+    def test_a_navdata_load_that_works_clears_the_error_of_the_one_that_failed(self):
+        # R17, the other half: the repair for a failed reload must be able to clear.
+        app = self.app
+        app._last_navdata_refresh_error, app._last_navdata_refresh_error_ts = "OSError: gone", 1.0
+        snapshot = self.engine_mod.NavDataSnapshot(
+            version=1, fix_coords={"AAAAA": ((1.0, 2.0),)}, airport_coords={}, airway_graph={},
+            loaded_at=1.0, load_issue_count=0, cycle="2001", valid_until=None, source_mtime=1.0)
+        app._apply_navdata_snapshot({"snapshot": snapshot})
+        self.assertIsNone(app._last_navdata_refresh_error)
+
+
 class Texts(unittest.TestCase):
     def test_every_problem_has_a_title_and_a_description_whose_placeholders_it_fills(self):
         with open(os.path.join(PACKAGE_DIR, "translations", "en.json"), encoding="utf-8") as fh:
@@ -209,7 +268,9 @@ class Texts(unittest.TestCase):
         for elapsed in (0, 3600):
             raised = watch.evaluate(T0 + elapsed, ("unavailable", wrong), True, T0 + elapsed)
         raised.update(watch.evaluate(T0 + 3630, ("healthy", dict(HEALTHY, navdata_status="expired")), True, T0 + 3630))
-        raised.update(problems.ProblemWatch(started=T0).evaluate(T0 + 301, None, False, None))
+        stopped = problems.ProblemWatch(started=T0)
+        for elapsed in (301, 331):
+            raised.update(stopped.evaluate(T0 + elapsed, None, False, None))
         watch = problems.ProblemWatch(started=T0)
         watch.evaluate(T0, ("healthy", HEALTHY), True, T0)
         raised.update(watch.evaluate(T0 + 200, ("healthy", HEALTHY), True, T0 + 200))
