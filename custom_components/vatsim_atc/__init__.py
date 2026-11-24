@@ -66,11 +66,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: VatsimConfigEntry) -> bo
     # navigation data not loaded, ...). Stopped and cleared when the entry unloads.
     reporter = IssueReporter(hass, entry, tracker)
     reporter.start()
-    entry.async_on_unload(reporter.stop)
+    # Kept where async_remove_entry can find it: Home Assistant removes an entry even when
+    # its unload failed, and then the unload callbacks below never run.
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = reporter
+
+    @callback
+    def stop_reporter() -> None:
+        reporter.stop()
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+
+    entry.async_on_unload(stop_reporter)
 
     async def on_stop(event: Event) -> None:
         # Entries are not unloaded when Home Assistant stops. Without this the worker could
         # hold shutdown for one download timeout and the last position would not be saved.
+        reporter.pause()
         await hass.async_add_executor_job(tracker.shutdown)
 
     entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, on_stop))
@@ -90,6 +100,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: VatsimConfigEntry) -> b
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: VatsimConfigEntry) -> None:
+    # Normally the unload already did both of these. After a failed unload it did neither,
+    # and the reporter and the tracker would run on for an entry that no longer exists.
+    reporter = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    if reporter is not None:
+        reporter.stop()
+    tracker = getattr(entry, "runtime_data", None)
+    if tracker is not None:
+        await hass.async_add_executor_job(tracker.shutdown)   # returns at once if already stopped
     path = _last_aircraft_file(hass, entry.entry_id)
 
     def remove() -> None:

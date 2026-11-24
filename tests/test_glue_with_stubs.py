@@ -50,7 +50,7 @@ class _Session:
 class _Hass:
     def __init__(self, loop, folder):
         self.loop, self.session, self.entities, self.stop_listeners = loop, _Session(), [], []
-        self.issues, self.intervals = {}, []
+        self.issues, self.issue_events, self.intervals, self.data = {}, [], [], {}
         outer = self
         self.config = type("C", (), {"path": staticmethod(lambda *p: os.path.join(folder, *p))})()
         self.bus = type("B", (), {"async_listen_once": staticmethod(
@@ -163,13 +163,20 @@ class Glue(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(interval.total_seconds(), 30)
         tracker = self.entry.runtime_data
         self.assertTrue(await until(lambda: tracker.published.get("sensor.vatsim_feed_health", (None,))[0] == "healthy"))
+        self.assertIsNotNone(tracker.last_health_check)                   # the engine's own heartbeat
         check()
         self.assertEqual(self.hass.issues, {})                            # healthy: nothing raised
 
-        real_time, clock = issues_mod.time, type("Clock", (), {"offset": 0.0})()
-        clock.time = lambda: real_time.time() + clock.offset
+        # The reporter must read the monotonic clock only. The wall clock is moved an hour
+        # each way below and nothing may come of it.
+        real_time, clock = issues_mod.time, type("Clock", (), {"offset": 0.0, "wall": 0.0})()
+        clock.monotonic = lambda: real_time.monotonic() + clock.offset
+        clock.time = lambda: real_time.time() + clock.wall
         issues_mod.time = clock
         try:
+            for clock.wall in (3600.0, -3600.0):
+                check()
+                self.assertEqual(self.hass.issues, {})
             # Boundaries lost, and navigation data expired, as the engine would publish them.
             state, attrs = tracker.published["sensor.vatsim_feed_health"]
             broken = dict(attrs, geometry_status="loading", last_geometry_refresh_error="OSError: no route",
@@ -185,25 +192,62 @@ class Glue(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((expired["is_fixable"], expired["is_persistent"], expired["severity"]),
                              (False, False, severity.WARNING))
             clock.offset = problems.HOLD_BOUNDARIES + 1
-            tracker.last_publish = clock.time()
-            broken["last_success_ts"] = clock.time()
+            tracker.last_health_check = clock.monotonic()
+            broken["last_success_ts"] = broken["last_success_ts"] + 1      # a newer good download
             check()
             boundaries = self.hass.issues[("vatsim_atc", "boundaries_not_loaded_entry1")]
             self.assertEqual(boundaries["translation_placeholders"], {"error": "OSError: no route"})
-            # The engine goes quiet: only that is reported, as an error.
+            # The engine goes quiet: that is reported as an error, and what was already
+            # reported stays, with no second notice for it.
+            del self.hass.issue_events[:]
             clock.offset += problems.STALLED_SECONDS + 1
             check()
-            self.assertEqual(list(self.hass.issues), [("vatsim_atc", "tracker_stalled_entry1")])
+            self.assertEqual(sorted(k for _, k in self.hass.issues), [
+                "boundaries_not_loaded_entry1", "navdata_expired_entry1", "tracker_stalled_entry1"])
             stalled = self.hass.issues[("vatsim_atc", "tracker_stalled_entry1")]
             self.assertEqual((stalled["severity"], stalled["translation_placeholders"]), (severity.ERROR, None))
+            tracker.last_health_check = clock.monotonic()                 # and comes back
+            broken["last_success_ts"] = broken["last_success_ts"] + 1      # with a fresh download
+            check()
+            self.assertEqual(self.hass.issue_events, [("create", "tracker_stalled_entry1"),
+                                                      ("remove", "tracker_stalled_entry1")])
             # Unloading clears whatever is raised and stops the timer.
             for stop in self.entry.unload_callbacks:
                 stop()
             self.assertEqual(self.hass.issues, {})
             self.assertEqual(self.hass.intervals, [])
+            self.assertEqual(self.hass.data["vatsim_atc"], {})
             tracker.set_state = freeze
         finally:
             issues_mod.time = real_time
+
+    async def test_home_assistant_stopping_ends_the_checks_without_reporting_a_stopped_tracker(self):
+        self.assertEqual(len(self.hass.intervals), 1)
+        await self.hass.stop_listeners[0][1](None)
+        self.assertEqual(self.hass.intervals, [])
+        self.assertEqual(self.hass.issues, {})
+
+    async def test_removing_an_entry_whose_unload_failed_still_stops_everything(self):
+        tracker = self.entry.runtime_data
+        self.assertTrue(await until(lambda: tracker.published.get("sensor.vatsim_feed_health", (None,))[0] == "healthy"))
+        reporter = self.hass.data["vatsim_atc"]["entry1"]
+        state, attrs = tracker.published["sensor.vatsim_feed_health"]
+        tracker.published = {**tracker.published, "sensor.vatsim_feed_health": (
+            state, dict(attrs, navdata_status="expired", navdata_cycle="2001", navdata_valid_until="2020-01-29"))}
+        reporter.check()
+        self.assertEqual(len(self.hass.issues), 1)
+        # No unload callback has run: this is what Home Assistant does after a failed unload.
+        await integration.async_remove_entry(self.hass, self.entry)
+        self.assertEqual((self.hass.issues, self.hass.intervals, self.hass.data["vatsim_atc"]), ({}, [], {}))
+        self.assertTrue(tracker._stopped.is_set())
+        await integration.async_remove_entry(self.hass, self.entry)       # a second call is harmless
+
+    async def test_the_issue_stand_in_refuses_what_home_assistant_would_refuse(self):
+        registry = sys.modules["homeassistant.helpers.issue_registry"]
+        with self.assertRaises(TypeError):
+            registry.async_create_issue(self.hass, "vatsim_atc", "x", typo_argument=True)
+        with self.assertRaises(TypeError):
+            registry.async_create_issue(self.hass, "vatsim_atc", "x", is_fixable=False, translation_key="k")
 
     async def test_restored_airport_is_sanitised(self):
         text = importlib.import_module("custom_components.vatsim_atc.text")

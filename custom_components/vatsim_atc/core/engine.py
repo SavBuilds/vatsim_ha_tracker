@@ -717,6 +717,9 @@ class VatsimAtcEngine:
         self._resolved_ctr_cache: Dict[Tuple[int, str, str], Optional["CtrFeature"]] = {}
         self._last_geometry_refresh_error: Optional[str] = None
         self._last_geometry_refresh_error_ts: Optional[float] = None
+        # time.monotonic() of the last health check that ran to its end. Read from another
+        # thread by the host's problem reporter; a plain float, so the read is safe.
+        self.last_health_check: Optional[float] = None
 
         self._navdata: Optional[NavDataSnapshot] = None
         self._navdata_version_counter = 0
@@ -1778,10 +1781,12 @@ class VatsimAtcEngine:
             "publish_unverified": ",".join(self._publish_failing()),
         }
         snapshot = (health.value, tuple(sorted(attrs.items())))
-        if snapshot == self._last_feed_health_published:
-            return
-        self._last_feed_health_published = snapshot
-        self.set_state("sensor.vatsim_feed_health", state=health.value, attributes=attrs)
+        if snapshot != self._last_feed_health_published:
+            self._last_feed_health_published = snapshot
+            self.set_state("sensor.vatsim_feed_health", state=health.value, attributes=attrs)
+        # Only here, after everything above worked: an unchanged health still counts as a
+        # check, a health report that raised does not.
+        self.last_health_check = time.monotonic()
 
     # ---- Pilot presence state machine -------------------------------------
 

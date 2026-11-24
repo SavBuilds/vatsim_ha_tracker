@@ -108,15 +108,27 @@ def install():
             DeviceEntryType=enum.Enum("DeviceEntryType", "SERVICE"))
     _module("homeassistant.helpers.entity", Entity=Entity)
 
-    def create_issue(hass, domain, issue_id, **details):
+    # The keyword list is Home Assistant's own (helpers/issue_registry.py, 2026.10): a wrong or
+    # missing argument fails here as it would there.
+    def create_issue(hass, domain, issue_id, *, breaks_in_ha_version=None, data=None, is_fixable,
+                     is_persistent=False, issue_domain=None, learn_more_url=None, severity,
+                     translation_key, translation_placeholders=None):
         assert asyncio.get_running_loop() is hass.loop, "issue raised off the loop"
-        placeholders = details.get("translation_placeholders")
+        assert isinstance(is_fixable, bool) and isinstance(is_persistent, bool)
+        assert isinstance(severity, sys.modules["homeassistant.helpers.issue_registry"].IssueSeverity)
+        assert isinstance(translation_key, str) and translation_key
+        placeholders = translation_placeholders
         assert placeholders is None or all(isinstance(v, str) for v in placeholders.values())
-        hass.issues[(domain, issue_id)] = details
+        hass.issue_events.append(("update" if (domain, issue_id) in hass.issues else "create", issue_id))
+        hass.issues[(domain, issue_id)] = {
+            "is_fixable": is_fixable, "is_persistent": is_persistent, "severity": severity,
+            "translation_key": translation_key, "translation_placeholders": translation_placeholders,
+            "learn_more_url": learn_more_url}
 
     def delete_issue(hass, domain, issue_id):
         assert asyncio.get_running_loop() is hass.loop, "issue cleared off the loop"
-        hass.issues.pop((domain, issue_id), None)
+        if hass.issues.pop((domain, issue_id), None) is not None:
+            hass.issue_events.append(("remove", issue_id))
 
     _module("homeassistant.helpers.issue_registry", async_create_issue=create_issue,
             async_delete_issue=delete_issue, IssueSeverity=enum.Enum("IssueSeverity", "CRITICAL ERROR WARNING"))

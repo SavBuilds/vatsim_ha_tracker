@@ -9,8 +9,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _harness import PACKAGE_DIR, load  # noqa: E402
 
 problems = load("core.problems")
-T0 = 1_000_000.0
-HEALTHY = {"last_success_ts": T0, "consecutive_failures": 0, "timestamp_status": "ok",
+T0 = 5_000.0               # the monotonic clock: unrelated to the date
+WALL = 1_000_000.0         # the wall clock the engine stamps last_success_ts with
+HEALTHY = {"last_success_ts": WALL, "consecutive_failures": 0, "timestamp_status": "ok",
            "geometry_status": "ready", "navdata_status": "active", "navdata_load_issue_count": 0}
 
 
@@ -19,14 +20,15 @@ class Rules(unittest.TestCase):
         self.watch = problems.ProblemWatch(started=T0)
 
     def run_for(self, seconds, attrs, connected=False, step=30, fresh=True, start=0):
-        """Evaluate every `step` seconds, as the integration's timer does. fresh=True keeps the
-        last good download current, the way a working feed would."""
+        """Evaluate every `step` seconds, as the integration's timer does. Times are the
+        monotonic clock's. fresh=True moves last_success_ts on each time, the way a working
+        feed would; the engine's health check is always current."""
         active = {}
         for elapsed in range(start, start + seconds + 1, step):
             now = T0 + elapsed
             current = dict(attrs)
             if fresh and current.get("last_success_ts"):
-                current["last_success_ts"] = now
+                current["last_success_ts"] = WALL + elapsed
             active = self.watch.evaluate(now, ("healthy", current), connected, now)
         return active
 
@@ -34,7 +36,7 @@ class Rules(unittest.TestCase):
         self.assertEqual(self.run_for(3600, HEALTHY), {})
         self.assertEqual(self.run_for(3600, HEALTHY, connected=True, start=3600), {})
 
-    def test_nothing_is_reported_before_the_first_publish_until_the_grace_time_is_up(self):
+    def test_nothing_is_reported_before_the_first_health_check_until_the_grace_time_is_up(self):
         self.assertEqual(self.watch.evaluate(T0 + 299, None, False, None), {})
         self.assertEqual(self.watch.evaluate(T0 + 301, None, False, None), {problems.TRACKER_STALLED: {}})
 
@@ -53,30 +55,91 @@ class Rules(unittest.TestCase):
     def test_feed_stale_is_quicker_while_connected(self):
         old = dict(HEALTHY, consecutive_failures=5)
         for connected, limit in ((True, problems.STALE_CONNECTED_SECONDS), (False, problems.STALE_IDLE_SECONDS)):
-            watch = problems.ProblemWatch(started=T0)
-            before = watch.evaluate(T0 + limit - 1, ("unavailable", old), connected, T0 + limit - 1)
-            after = watch.evaluate(T0 + limit + 1, ("unavailable", old), connected, T0 + limit + 1)
-            self.assertEqual((before, list(after)), ({}, [problems.FEED_STALE]), connected)
+            self.watch = problems.ProblemWatch(started=T0)
+            self.assertEqual(self.run_for(limit, old, connected, fresh=False), {}, connected)
+            self.assertEqual(list(self.run_for(0, old, connected, fresh=False, start=limit + 30)),
+                             [problems.FEED_STALE], connected)
+            self.assertEqual(self.run_for(0, dict(old, last_success_ts=WALL + 9), connected, fresh=False,
+                                          start=limit + 60), {}, connected)    # a new download clears it
         self.assertLess(problems.STALE_CONNECTED_SECONDS, problems.STALE_IDLE_SECONDS)
 
-    def test_a_stopped_engine_is_the_only_thing_reported(self):
-        broken = dict(HEALTHY, geometry_status="loading", navdata_status="expired")
-        now = T0 + 5000
-        self.assertEqual(self.watch.evaluate(now, ("healthy", broken), True, now - problems.STALLED_SECONDS - 1),
-                         {problems.TRACKER_STALLED: {}})
-        self.assertNotIn(problems.TRACKER_STALLED, self.watch.evaluate(now, ("healthy", broken), True, now - 10))
+    def test_wall_clock_steps_change_nothing(self):
+        # R16. last_success_ts is a wall-clock value from the engine. Whatever it reads against
+        # "now", only its changing matters: an hour ahead or behind raises nothing while it
+        # keeps moving, and does not hide a feed that stopped.
+        for skew in (3600.0, -3600.0, 0.0):
+            self.watch = problems.ProblemWatch(started=T0)
+            moving = dict(HEALTHY, last_success_ts=WALL + skew)
+            for elapsed in range(0, 1801, 30):
+                moving["last_success_ts"] += 15
+                self.assertEqual(self.watch.evaluate(T0 + elapsed, ("healthy", moving), True, T0 + elapsed), {}, skew)
+            stopped = self.run_for(210, moving, connected=True, fresh=False, start=1830)
+            self.assertEqual(list(stopped), [problems.FEED_STALE], skew)
 
-    def test_processing_error_boundaries_and_navdata_each_need_five_minutes(self):
+    def test_a_stopped_engine_is_reported_and_what_was_already_reported_stays(self):
+        # R19: expired navdata must not be cleared by a stall and raised again after it.
+        expired = dict(HEALTHY, navdata_status="expired", navdata_cycle="2001", navdata_valid_until="2020-01-29")
+        before = self.run_for(60, expired)
+        self.assertEqual(list(before), [problems.NAVDATA_EXPIRED])
+        now = T0 + 5000
+        during = self.watch.evaluate(now, ("healthy", expired), False, now - problems.STALLED_SECONDS - 1)
+        self.assertEqual(during, {**before, problems.TRACKER_STALLED: {}})
+        after = self.watch.evaluate(now + 30, ("healthy", dict(expired, last_success_ts=WALL + 1)), False, now + 30)
+        self.assertEqual(after, before)
+
+    def test_a_stall_does_not_report_what_was_not_reported_before(self):
+        loading = dict(HEALTHY, geometry_status="loading", last_geometry_refresh_error="X")
+        self.run_for(60, loading)                                              # inside its hold
+        now = T0 + 5000
+        self.assertEqual(self.watch.evaluate(now, ("healthy", loading), True, now - problems.STALLED_SECONDS - 1),
+                         {problems.TRACKER_STALLED: {}})
+
+    def test_health_that_is_never_checked_is_a_stopped_tracker_whatever_else_is_published(self):
+        # R14: the caller passes the engine's health heartbeat, not the time of any publish.
+        # With health absent and the heartbeat absent, the grace time ends in a report.
+        self.assertEqual(self.watch.evaluate(T0 + 3600, None, True, None), {problems.TRACKER_STALLED: {}})
+        # With health present but its heartbeat old, the same.
+        self.assertIn(problems.TRACKER_STALLED,
+                      self.watch.evaluate(T0 + 3600, ("healthy", HEALTHY), True, T0 + 3600 - 301))
+
+    def test_failures_need_five_minutes(self):
         cases = ((problems.PROCESSING_ERROR, dict(HEALTHY, timestamp_status="processing_error")),
-                 (problems.BOUNDARIES_NOT_LOADED, dict(HEALTHY, geometry_status="loading")),
+                 (problems.BOUNDARIES_NOT_LOADED, dict(HEALTHY, geometry_status="loading",
+                                                       last_geometry_refresh_error="FetchError: down")),
                  (problems.NAVDATA_NOT_LOADED, dict(HEALTHY, navdata_status="configured_but_empty")),
-                 (problems.NAVDATA_NOT_LOADED, dict(HEALTHY, navdata_status="configured_but_unloaded")),
+                 (problems.NAVDATA_NOT_LOADED, dict(HEALTHY, navdata_status="configured_but_unloaded",
+                                                    last_navdata_refresh_error="OSError: gone")),
                  (problems.NAVDATA_NOT_LOADED, dict(HEALTHY, navdata_load_issue_count=2)))
         for key, attrs in cases:
             self.watch = problems.ProblemWatch(started=T0)
             self.assertEqual(self.run_for(270, attrs), {}, key)
             self.assertEqual(list(self.run_for(30, attrs, start=300)), [key], attrs)
             self.assertEqual(self.run_for(30, HEALTHY, start=360), {}, key)
+
+    def test_a_load_still_running_with_no_error_is_given_thirty_minutes(self):
+        # R15: "loading" and "configured_but_unloaded" are also what a healthy start reads.
+        cases = ((problems.BOUNDARIES_NOT_LOADED, dict(HEALTHY, geometry_status="loading")),
+                 (problems.NAVDATA_NOT_LOADED, dict(HEALTHY, navdata_status="configured_but_unloaded")))
+        self.assertGreater(problems.HOLD_STILL_LOADING, problems.HOLD_BOUNDARIES)
+        for key, attrs in cases:
+            self.watch = problems.ProblemWatch(started=T0)
+            self.assertEqual(self.run_for(problems.HOLD_STILL_LOADING - 30, attrs), {}, key)
+            self.assertEqual(list(self.run_for(30, attrs, start=problems.HOLD_STILL_LOADING)), [key], key)
+            self.assertEqual(self.run_for(30, HEALTHY, start=problems.HOLD_STILL_LOADING + 60), {}, key)
+
+    def test_an_error_during_a_slow_load_is_reported_five_minutes_after_the_error(self):
+        loading = dict(HEALTHY, geometry_status="loading")
+        self.assertEqual(self.run_for(600, loading), {})
+        failed = dict(loading, last_geometry_refresh_error="FetchError: down")
+        self.assertEqual(self.run_for(270, failed, start=630), {})
+        self.assertEqual(list(self.run_for(30, failed, start=930)), [problems.BOUNDARIES_NOT_LOADED])
+
+    def test_a_failed_navdata_reload_is_reported_while_the_older_data_stays_active(self):
+        # R17: status "active", no load issues, but the reload raised.
+        attrs = dict(HEALTHY, last_navdata_refresh_error="UnicodeDecodeError: bad byte")
+        self.assertEqual(self.run_for(270, attrs), {})
+        self.assertEqual(self.run_for(30, attrs, start=300), {problems.NAVDATA_NOT_LOADED: {
+            "status": "active", "error": "UnicodeDecodeError: bad byte"}})
 
     def test_expired_navdata_is_reported_at_once_with_its_cycle(self):
         expired = dict(HEALTHY, navdata_status="expired", navdata_cycle="2001", navdata_valid_until="2020-01-29")
@@ -93,18 +156,45 @@ class Rules(unittest.TestCase):
         text = self.run_for(330, attrs)[problems.BOUNDARIES_NOT_LOADED]["error"]
         self.assertEqual(len(text), 300)
         self.watch = problems.ProblemWatch(started=T0)
-        none = self.run_for(330, dict(HEALTHY, geometry_status="loading"))
+        none = self.run_for(problems.HOLD_STILL_LOADING + 30, dict(HEALTHY, geometry_status="loading"))
         self.assertEqual(none[problems.BOUNDARIES_NOT_LOADED]["error"], "no error was recorded")
 
     def test_placeholders_are_strings_and_stable_between_checks(self):
-        attrs = dict(HEALTHY, geometry_status="loading", navdata_status="expired", navdata_cycle=2001,
-                     consecutive_failures=1)
+        attrs = dict(HEALTHY, geometry_status="loading", last_geometry_refresh_error="X",
+                     navdata_status="expired", navdata_cycle=2001, consecutive_failures=1)
         first = self.run_for(330, attrs)
         attrs["consecutive_failures"] = 99                    # a counter that moves every poll
         second = self.run_for(30, attrs, start=360)
         self.assertEqual(first, second)
+        self.assertEqual(len(first), 2)
         for placeholders in first.values():
             self.assertTrue(all(isinstance(v, str) for v in placeholders.values()))
+
+
+class EngineHeartbeat(unittest.TestCase):
+    """R14 at its source: the engine's heartbeat moves only when a health check ran to its end."""
+
+    def setUp(self):
+        from _harness import make_engine
+        self.engine_mod = load("core.engine")
+        self.app = make_engine()
+
+    def test_it_moves_on_a_check_even_when_nothing_changed_and_not_when_the_check_raises(self):
+        app, health = self.app, self.engine_mod.FeedHealth.HEALTHY
+        self.assertIsNone(app.last_health_check)
+        app._publish_feed_health(health, 1000.0, timestamp_status="ok")
+        first = app.last_health_check
+        self.assertIsNotNone(first)
+        writes = len(app.writes)
+        app.last_health_check = None
+        app._publish_feed_health(health, 1000.0, timestamp_status="ok")       # identical: not published again
+        self.assertEqual(len(app.writes), writes)
+        self.assertIsNotNone(app.last_health_check)
+        app.last_health_check = None
+        app._compute_navdata_status = lambda: 1 / 0                           # the health report itself fails
+        with self.assertRaises(ZeroDivisionError):
+            app._publish_feed_health(health, 2000.0, timestamp_status="ok")
+        self.assertIsNone(app.last_health_check)
 
 
 class Texts(unittest.TestCase):
@@ -112,8 +202,19 @@ class Texts(unittest.TestCase):
         with open(os.path.join(PACKAGE_DIR, "translations", "en.json"), encoding="utf-8") as fh:
             issues = json.load(fh)["issues"]
         self.assertEqual(sorted(issues), sorted(problems.ALL))
-        provided = {problems.BOUNDARIES_NOT_LOADED: {"error"}, problems.NAVDATA_NOT_LOADED: {"status", "error"},
-                    problems.NAVDATA_EXPIRED: {"cycle", "valid_until"}}
+        # What the rules actually supply, taken from the rules: everything wrong at once.
+        watch = problems.ProblemWatch(started=T0)
+        wrong = {"last_success_ts": 0, "consecutive_failures": 3, "timestamp_status": "processing_error",
+                 "geometry_status": "loading", "navdata_status": "configured_but_empty"}
+        for elapsed in (0, 3600):
+            raised = watch.evaluate(T0 + elapsed, ("unavailable", wrong), True, T0 + elapsed)
+        raised.update(watch.evaluate(T0 + 3630, ("healthy", dict(HEALTHY, navdata_status="expired")), True, T0 + 3630))
+        raised.update(problems.ProblemWatch(started=T0).evaluate(T0 + 301, None, False, None))
+        watch = problems.ProblemWatch(started=T0)
+        watch.evaluate(T0, ("healthy", HEALTHY), True, T0)
+        raised.update(watch.evaluate(T0 + 200, ("healthy", HEALTHY), True, T0 + 200))
+        self.assertEqual(sorted(raised), sorted(problems.ALL))
+        provided = {key: set(placeholders) for key, placeholders in raised.items()}
         for key in problems.ALL:
             self.assertTrue(issues[key]["title"] and issues[key]["description"], key)
             wanted = set(re.findall(r"\{(\w+)\}", issues[key]["title"] + issues[key]["description"]))

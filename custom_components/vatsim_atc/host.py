@@ -15,7 +15,6 @@ import asyncio
 import concurrent.futures
 import logging
 import threading
-import time
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
@@ -52,7 +51,6 @@ class LoopHost(Host):
         # What entities read: engine entity id -> (state, attributes). Replaced whole on each
         # publish, never mutated, so a reader on the loop always sees a consistent pair.
         self.published: dict[str, tuple[Any, dict]] = {}
-        self.last_publish: Optional[float] = None   # time.time() of the newest publish
 
     # ---- Host contract -----------------------------------------------------------------
 
@@ -67,7 +65,6 @@ class LoopHost(Host):
         for key in STABLE_ATTRIBUTES.get(entity_id, ()):
             attributes.setdefault(key, None)   # present but null, so the key never disappears
         self.published = {**self.published, entity_id: (kwargs.get("state"), attributes)}
-        self.last_publish = time.time()    # read by the issue reporter to notice an engine that has stopped
         self._to_loop(self._on_publish, entity_id)
         return kwargs
 

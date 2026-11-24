@@ -27,7 +27,8 @@ PILOT_CONNECTED = "binary_sensor.vatsim_pilot_connected"
 class IssueReporter:
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, tracker: Tracker) -> None:
         self._hass, self._entry, self._tracker = hass, entry, tracker
-        self._watch = ProblemWatch(started=time.time())
+        # Monotonic, so a clock correction or a resume from suspend cannot raise or hide anything.
+        self._watch = ProblemWatch(started=time.monotonic())
         self._raised: Dict[str, Tuple[Tuple[str, str], ...]] = {}
         self._unsubscribe: Optional[Callable[[], None]] = None
 
@@ -43,8 +44,10 @@ class IssueReporter:
     def check(self, _now: Any = None) -> None:
         published = self._tracker.published
         pilot = published.get(PILOT_CONNECTED, (None, {}))[0]
-        active = self._watch.evaluate(time.time(), published.get(FEED_HEALTH), pilot == "on",
-                                      self._tracker.last_publish)
+        # The attribute does not exist until the engine has set itself up on its worker.
+        last_health_check = getattr(self._tracker, "last_health_check", None)
+        active = self._watch.evaluate(time.monotonic(), published.get(FEED_HEALTH), pilot == "on",
+                                      last_health_check)
         for key, placeholders in active.items():
             signature = tuple(sorted(placeholders.items()))
             if self._raised.get(key) == signature:
@@ -62,11 +65,18 @@ class IssueReporter:
             del self._raised[key]
 
     @callback
-    def stop(self) -> None:
-        """Stop checking and clear everything raised: an unloaded entry has no problems to report."""
+    def pause(self) -> None:
+        """Stop checking and leave what is raised alone. For Home Assistant stopping: the
+        tracker is shut down then, and that must not be reported as a tracker that stopped."""
         if self._unsubscribe is not None:
             self._unsubscribe()
             self._unsubscribe = None
+
+    @callback
+    def stop(self) -> None:
+        """Stop checking and clear everything raised: an unloaded entry has no problems to
+        report. Safe to call twice."""
+        self.pause()
         for key in list(self._raised):
             ir.async_delete_issue(self._hass, DOMAIN, self._issue_id(key))
         self._raised.clear()
