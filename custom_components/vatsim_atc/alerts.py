@@ -6,12 +6,16 @@ speaker, the entity that holds speech) and makes the service calls.
 
 A call that fails is logged and remembered, never raised: one dead speaker must not stop the
 rest. What is remembered is reported as a repair by issues.py, so a failure is not silent.
+
+Announcements go one at a time, and everything sent runs as a task of the config entry, so
+unloading the entry or stopping Home Assistant cancels a delivery still under way.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from functools import partial
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Coroutine, Dict, List, Mapping, Optional, Set, Tuple
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -51,6 +55,11 @@ class AlertManager:
         self._previous: Dict[str, Any] = {}
         self._unsubscribe: List[Callable[[], None]] = []
         self._cancel_confirm: Optional[Callable[[], None]] = None
+        # One announcement at a time. Two alerts from one feed update would otherwise talk
+        # over each other, and on many players the second cuts the first off.
+        self._lock = asyncio.Lock()
+        self._tasks: Set["asyncio.Task[Any]"] = set()
+        self._stopped = False
 
     # ---- lifecycle -------------------------------------------------------------------------
 
@@ -65,12 +74,29 @@ class AlertManager:
 
     @callback
     def stop(self) -> None:
+        """Stop listening and cancel anything still being sent. Runs on unload, on removal and
+        when Home Assistant stops. Safe to call twice."""
+        self._stopped = True
         for unsubscribe in self._unsubscribe:
             unsubscribe()
         self._unsubscribe.clear()
         if self._cancel_confirm is not None:
             self._cancel_confirm()
             self._cancel_confirm = None
+        for task in list(self._tasks):
+            task.cancel()
+
+    @callback
+    def _spawn(self, job: Coroutine[Any, Any, None], name: str) -> None:
+        if self._stopped:
+            job.close()                 # never started: nothing to send for an entry that is gone
+            return
+        # A task of the entry, not of Home Assistant: the entry's unload cancels its background
+        # tasks (config_entries.py, _async_process_on_unload), and stop() cancels them as well.
+        task = self._entry.async_create_background_task(self._hass, job, f"vatsim_atc alert {name}")
+        if not task.done():
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
 
     # ---- what the engine published -----------------------------------------------------------
 
@@ -82,7 +108,9 @@ class AlertManager:
             return                      # two publishes close together: the first call saw both
         self._previous[source] = new
         if source == rules.COVERAGE:
-            if rules.controller_online_started(old, new):
+            # The switch is read at the change as well as when the wait is over, as the
+            # automation's condition did: a change while the alert is off is not announced.
+            if rules.controller_online_started(old, new) and self.enabled.get(rules.CONTROLLER_ONLINE, True):
                 # Starting again replaces a wait already running, as the automation did.
                 if self._cancel_confirm is not None:
                     self._cancel_confirm()
@@ -103,7 +131,15 @@ class AlertManager:
     @callback
     def _send(self, kind: str, message: Optional[Tuple[str, str]]) -> None:
         if message is not None and self.enabled.get(kind, True):
-            self._hass.async_create_task(self.async_announce(message[0], message[1], self.mode))
+            self._spawn(self._deliver(kind, message), kind)
+
+    async def _deliver(self, kind: str, message: Tuple[str, str]) -> None:
+        async with self._lock:
+            # Read again now that it is this alert's turn: the switch, the mode or the flight
+            # may have changed while an earlier announcement played.
+            if not self.enabled.get(kind, True) or not rules.still_due(kind, self._tracker.published):
+                return
+            await self.async_announce(message[0], message[1], self.mode)
 
     # ---- sending -----------------------------------------------------------------------------
 
@@ -122,8 +158,20 @@ class AlertManager:
     async def async_test(self) -> None:
         """The test button: a push and speech whatever the alert mode is, so the whole path
         can be checked without a flight. The speaker switches and the hold entity still apply."""
-        await self.async_announce("VATSIM test alert", "This is a test of the VATSIM alerts.",
-                                  rules.MODE_PUSH_AND_SPEAKER)
+        async with self._lock:
+            await self.async_announce("VATSIM test alert", "This is a test of the VATSIM alerts.",
+                                      rules.MODE_PUSH_AND_SPEAKER)
+
+    def _unusable(self, entity_id: str) -> Optional[str]:
+        """Why a call to this entity would deliver nothing, or None. Home Assistant leaves an
+        unavailable entity out of a service call and only logs a missing one, and the call
+        then returns normally (helpers/service.py, line 743 in 2026.11.3), so it is caught here."""
+        state = self._hass.states.get(entity_id)
+        if state is None:
+            return f"{entity_id} does not exist"
+        if state.state == "unavailable":
+            return f"{entity_id} is unavailable"
+        return None
 
     async def async_announce(self, title: str, message: str, mode: str) -> None:
         speech = rules.speech_enabled(mode)
@@ -137,9 +185,13 @@ class AlertManager:
         if held and gate and rules.mute_gate_broken(gate_state):
             # A broken hold entity is not what the hold exists for. Say so where it will be seen;
             # the repair follows if it stays broken.
-            await self._call("persistent_notification", "create", {
+            error = await self._call("persistent_notification", "create", {
                 "notification_id": SPEECH_HELD_NOTICE, "title": "VATSIM speech held",
                 "message": f"{gate[0]} is {gate_state}, so VATSIM speech was skipped: {message}"})
+            if error:
+                # This notice is the only word that speech was skipped, so its failure is a
+                # speech failure. Nothing below clears it: the hold stops every speaker.
+                self.speech_error = f"speech-held notice: {error}"[:300]
         if not speech or not players:
             return
         failed: List[str] = []
@@ -149,8 +201,10 @@ class AlertManager:
             now = self.gate()
             if rules.mute_gate_holds(now[1] if now else None):
                 break
-            error = await self._call("tts", "speak", {
-                "entity_id": self.tts_entity, "media_player_entity_id": player, "message": message})
+            error = self._unusable(self.tts_entity) or self._unusable(player)
+            if error is None:
+                error = await self._call("tts", "speak", {
+                    "entity_id": self.tts_entity, "media_player_entity_id": player, "message": message})
             spoken += 1
             if error:
                 failed.append(f"speech on {player}: {error}")
@@ -177,8 +231,11 @@ class AlertManager:
                     data["data"] = {"tag": tag}
                 error = await self._call("notify", service, data)
             elif target.startswith(ENTITY_TARGET_PREFIX):
-                error = await self._call("notify", "send_message", {
-                    "entity_id": target[len(ENTITY_TARGET_PREFIX):], "title": title, "message": message})
+                entity_id = target[len(ENTITY_TARGET_PREFIX):]
+                error = self._unusable(entity_id)
+                if error is None:
+                    error = await self._call("notify", "send_message", {
+                        "entity_id": entity_id, "title": title, "message": message})
             else:
                 error = "not a notify action or entity"
             sent += 1
@@ -197,9 +254,9 @@ class AlertManager:
         if not self.push_repairs:
             return
         title = PUSH_TITLES.get(key, "VATSIM tracker problem")
-        self._hass.async_create_task(self.async_push(
+        self._spawn(self.async_push(
             title, "Open Settings > System > Repairs for what to check.", tag=f"vatsim_{key}",
-            clears=False, skip_sidebar=True))
+            clears=False, skip_sidebar=True), f"repair {key}")
 
     async def _call(self, domain: str, service: str, data: Dict[str, Any]) -> Optional[str]:
         """Make one service call. Returns the error text, or None when it worked."""

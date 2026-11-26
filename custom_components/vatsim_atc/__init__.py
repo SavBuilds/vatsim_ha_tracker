@@ -17,7 +17,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from .const import DOMAIN, USER_AGENT, engine_args, signal_for
 from .alerts import AlertManager
 from .host import Tracker
-from .issues import IssueReporter
+from .issues import IssueReporter, push_record_store
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -73,6 +73,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: VatsimConfigEntry) -> bo
     # Repairs issues for things the user should know about (feed unreachable, boundaries or
     # navigation data not loaded, ...). Stopped and cleared when the entry unloads.
     reporter = IssueReporter(hass, entry, tracker, alerts.problem_inputs, alerts.problem_raised)
+    await reporter.async_load()
     reporter.start()
     # Kept where async_remove_entry can find it: Home Assistant removes an entry even when
     # its unload failed, and then the unload callbacks below never run.
@@ -89,6 +90,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: VatsimConfigEntry) -> bo
         # Entries are not unloaded when Home Assistant stops. Without this the worker could
         # hold shutdown for one download timeout and the last position would not be saved.
         reporter.pause()
+        # Entries are not unloaded at a stop, so this is where a delivery still under way and
+        # a 20 second wait are ended.
+        alerts.stop()
         await hass.async_add_executor_job(tracker.shutdown)
 
     entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, on_stop))
@@ -118,6 +122,8 @@ async def async_remove_entry(hass: HomeAssistant, entry: VatsimConfigEntry) -> N
         if getattr(tracker, "alerts", None) is not None:
             tracker.alerts.stop()                              # safe to call twice
         await hass.async_add_executor_job(tracker.shutdown)   # returns at once if already stopped
+    # The record of pushed repairs belongs to this entry only.
+    await push_record_store(hass, entry.entry_id).async_remove()
     path = _last_aircraft_file(hass, entry.entry_id)
 
     def remove() -> None:

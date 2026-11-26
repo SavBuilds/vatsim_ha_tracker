@@ -34,6 +34,17 @@ MODES = (MODE_DISABLED, MODE_PUSH_AND_SPEAKER, MODE_PUSH_ONLY, MODE_SPEAKER_ONLY
 # A new install has one push target, the sidebar notice, and no speakers.
 DEFAULT_MODE = MODE_PUSH_ONLY
 
+# The alerts package's helpers. Read once, when the integration's own controls have no saved
+# state (an upgrade from the package), so the user's choices carry over. Speakers are not
+# here: the package named its speaker switches by room, the integration names them by media
+# player, and the two cannot be matched.
+LEGACY_MODE_ENTITY = "input_select.vatsim_alert_mode"
+_LEGACY_MODES = {"Disabled": MODE_DISABLED, "Push + Speaker": MODE_PUSH_AND_SPEAKER,
+                 "Push Only": MODE_PUSH_ONLY, "Speaker Only": MODE_SPEAKER_ONLY}
+LEGACY_SWITCHES = {CONTROLLER_ONLINE: "input_boolean.vatsim_alerts_immediate",
+                   NEXT_CONTROLLER: "input_boolean.vatsim_alerts_lookahead",
+                   ATIS_CHANGE: "input_boolean.vatsim_alerts_atis"}
+
 _NO_CALLSIGN = (None, "", "unknown")
 # Lookahead states that name no controller ahead.
 _NEXT_SECTOR_QUIET = frozenset({
@@ -55,6 +66,15 @@ def push_enabled(mode: str) -> bool:
 
 def speech_enabled(mode: str) -> bool:
     return mode in (MODE_PUSH_AND_SPEAKER, MODE_SPEAKER_ONLY)
+
+
+def legacy_mode(state: Optional[str]) -> Optional[str]:
+    """The mode the package's select stood at, or None when it is absent or unreadable."""
+    return _LEGACY_MODES.get(state) if state is not None else None
+
+
+def legacy_switch(state: Optional[str]) -> Optional[bool]:
+    return {"on": True, "off": False}.get(state) if state is not None else None
 
 
 def _parts(state: State) -> Tuple[Any, Mapping[str, Any]]:
@@ -108,6 +128,17 @@ def atis_change_message(old: State, new: State, pilot_connected: bool) -> Option
         return None
     letter = str(code).upper()
     return "VATSIM ATIS", f"{attrs.get('airport')} ATIS is now information {_PHONETIC.get(letter, letter)}."
+
+
+def still_due(kind: str, published: Mapping[str, State]) -> bool:
+    """Checked again when an alert's turn to be sent comes, which can be after an earlier
+    announcement has played. As in the package's queued ATIS automation, an ATIS change is not
+    announced once the flight or the destination's session has ended."""
+    if kind != ATIS_CHANGE:
+        return True
+    pilot, _ = _parts(published.get(PILOT_CONNECTED))
+    _, attrs = _parts(published.get(DESTINATION))
+    return pilot == "on" and attrs.get("session") == "connected"
 
 
 def mute_gate_holds(gate_state: Optional[str]) -> bool:

@@ -161,7 +161,7 @@
     },
     "metar_failing": {
       "title": "VATSIM METAR lookups are failing",
-      "description": "The destination has no ATIS, so the tracker asked for a METAR, and both sources (VATSIM and aviationweather.gov) have failed for at least 15 minutes. The ATIS card shows no weather meanwhile.\n\nLast error: {error}\n\nCheck Home Assistant's internet connection. The exact error is under Settings > System > Logs, search for vatsim_atc.\n\nThis clears by itself when a lookup works, or when no METAR is wanted any more."
+      "description": "The destination has no ATIS, so the tracker asked for a METAR, and for at least 15 minutes the lookups have ended in an error: one source (VATSIM or aviationweather.gov) failed and the other had no report or failed too. The ATIS card shows no weather meanwhile.\n\nLast error: {error}\n\nCheck Home Assistant's internet connection. The exact error is under Settings > System > Logs, search for vatsim_atc.\n\nThis clears by itself when a lookup works, or when no METAR is wanted any more."
     },
     "position_not_restored": {
       "title": "VATSIM saved aircraft position could not be read",

@@ -52,6 +52,9 @@ class _Hass:
         self.loop, self.session, self.entities, self.stop_listeners = loop, _Session(), [], []
         self.issues, self.issue_events, self.intervals, self.data = {}, [], [], {}
         self.later, self.tasks = [], []
+        self.storage, self.storage_broken = {}, set()
+        # Started unless a test says otherwise: most set up an entry on a running Home Assistant.
+        self.started, self.at_started = True, []
         self.states, self.entity_registry = ha_stubs.States(), ha_stubs.EntityRegistry()
         outer = self
         self.config = type("C", (), {"path": staticmethod(lambda *p: os.path.join(folder, *p))})()
@@ -83,7 +86,10 @@ class _Hass:
     async def settle(self):
         """Wait for everything the integration started in the background."""
         while self.tasks:
-            await self.tasks.pop(0)
+            try:
+                await self.tasks.pop(0)
+            except asyncio.CancelledError:
+                pass                    # cancelled by the code under test, which is allowed
 
     async def async_add_executor_job(self, func, *args):
         return await self.loop.run_in_executor(None, func, *args)
@@ -242,6 +248,18 @@ class Glue(unittest.IsolatedAsyncioTestCase):
         await self.hass.stop_listeners[0][1](None)
         self.assertEqual(self.hass.intervals, [])
         self.assertEqual(self.hass.issues, {})
+
+    async def test_home_assistant_stopping_ends_the_alerts(self):
+        alert_signal = const.signal_for("entry1", "sensor.vatsim_next_sector")
+        self.assertEqual(len(DISPATCHER.targets.get(alert_signal, [])), 2)    # the sensor and the alerts
+        await self.hass.stop_listeners[0][1](None)
+        self.assertEqual(len(DISPATCHER.targets[alert_signal]), 1)            # only the sensor is left
+
+    async def test_removing_the_entry_removes_its_record_of_pushed_repairs(self):
+        self.hass.storage["vatsim_atc.entry1.pushed_repairs"] = {"keys": ["feed_stale"]}
+        self.hass.storage["vatsim_atc.entry2.pushed_repairs"] = {"keys": ["feed_stale"]}
+        await integration.async_remove_entry(self.hass, self.entry)
+        self.assertEqual(list(self.hass.storage), ["vatsim_atc.entry2.pushed_repairs"])
 
     async def test_removing_an_entry_whose_unload_failed_still_stops_everything(self):
         tracker = self.entry.runtime_data

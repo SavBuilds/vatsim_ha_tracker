@@ -55,9 +55,30 @@ class ConfigEntry:
         self.entry_id, self.data, self.options = entry_id, data, options or {}
         self.runtime_data = None
         self.unload_callbacks = []
+        self.background_tasks = set()
 
     def async_on_unload(self, func):
         self.unload_callbacks.append(func)
+
+    def async_create_background_task(self, hass, target, name, eager_start=True):
+        # Tracked by hass.tasks as well, so a test can wait for it with hass.settle().
+        task = hass.async_create_task(target, name)
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.discard)
+        return task
+
+    async def run_unload(self):
+        """What Home Assistant does after async_unload_entry (config_entries.py,
+        _async_process_on_unload, 2026.11.3): the unload callbacks, last added first, then
+        every background task of the entry is cancelled."""
+        while self.unload_callbacks:
+            job = self.unload_callbacks.pop()()
+            if asyncio.iscoroutine(job):
+                await job
+        tasks = list(self.background_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def add_update_listener(self, listener):
         self.update_listener = listener
@@ -137,15 +158,56 @@ class States:
         return [s for s in self.all.values() if domain_filter is None or s.entity_id.split(".")[0] == domain_filter]
 
 
+class ServiceNotFound(Exception):
+    """homeassistant.exceptions.ServiceNotFound: raised for an action that is not registered."""
+
+    def __init__(self, domain, service):
+        super().__init__(f"Action {domain}.{service} not found")
+
+
+class ServiceDataInvalid(Exception):
+    """What Home Assistant raises when the data does not pass the action's schema."""
+
+
+_TARGET = {"entity_id", "device_id", "area_id", "floor_id", "label_id"}
+# (required, optional) keys, from the schemas in Home Assistant 2026.11.3: notify/const.py
+# NOTIFY_SERVICE_SCHEMA (legacy notify actions), notify/services.py (send_message, an entity
+# action), tts/services.py (speak, an entity action), persistent_notification/services.py.
+_SCHEMAS = {
+    ("notify", "send_message"): ({"message"}, {"title"} | _TARGET),
+    ("tts", "speak"): ({"media_player_entity_id", "message"}, {"cache", "language", "options"} | _TARGET),
+    ("persistent_notification", "create"): ({"message"}, {"title", "notification_id"}),
+    ("persistent_notification", "dismiss"): ({"notification_id"}, set()),
+}
+_LEGACY_NOTIFY = ({"message"}, {"title", "target", "data"})
+
+
 class Services:
-    """Records calls. A (domain, service) put in .failing raises, as a missing or broken action would."""
+    """Records calls. An action that is not registered or data its schema would refuse is
+    refused, as Home Assistant refuses it, and not recorded. A (domain, service) put in
+    .failing is recorded and then raises, as an action that fails while it runs would."""
 
     def __init__(self, notify=("persistent_notification", "send_message", "notify")):
         self.calls, self.failing, self.notify = [], {}, list(notify)
 
+    def _schema(self, domain, service):
+        if domain == "notify" and service in self.notify:
+            return _SCHEMAS.get((domain, service), _LEGACY_NOTIFY)
+        return _SCHEMAS.get((domain, service))
+
     async def async_call(self, domain, service, service_data=None, blocking=False, context=None, target=None,
                          return_response=False):
-        self.calls.append((domain, service, dict(service_data or {})))
+        schema = self._schema(domain, service)
+        if schema is None:
+            raise ServiceNotFound(domain, service)
+        data = dict(service_data or {})
+        required, optional = schema
+        if not required <= set(data) or set(data) - required - optional:
+            raise ServiceDataInvalid(f"{domain}.{service}: {sorted(data)}")
+        for key in ("message", "title"):
+            if key in data and not isinstance(data[key], str):
+                raise ServiceDataInvalid(f"{domain}.{service}: {key} is not text")
+        self.calls.append((domain, service, data))
         if (domain, service) in self.failing:
             raise self.failing[(domain, service)]
 
@@ -190,7 +252,8 @@ def install():
             STATE_UNKNOWN="unknown", STATE_UNAVAILABLE="unavailable",
             EntityCategory=enum.Enum("EntityCategory", "CONFIG DIAGNOSTIC"))
     _module("homeassistant.core", HomeAssistant=object, Event=object, callback=mark_callback)
-    _module("homeassistant.exceptions", ConfigEntryError=type("ConfigEntryError", (Exception,), {}))
+    _module("homeassistant.exceptions", ConfigEntryError=type("ConfigEntryError", (Exception,), {}),
+            ServiceNotFound=ServiceNotFound)
     _module("homeassistant.helpers")
     _module("homeassistant.helpers.aiohttp_client", async_get_clientsession=lambda hass: hass.session)
     _module("homeassistant.helpers.dispatcher", async_dispatcher_connect=dispatcher.connect,
@@ -237,11 +300,53 @@ def install():
 
     _module("homeassistant.helpers.event", async_track_time_interval=track_interval, async_call_later=call_later)
 
+    # helpers/start.py: run now if Home Assistant has started, else when it has.
+    def at_started(hass, action):
+        assert runs_on_the_loop(action), f"{action!r} would run in a worker thread"
+        if hass.started:
+            action(hass)
+            return lambda: None
+        hass.at_started.append(action)
+        return lambda: hass.at_started.remove(action) if action in hass.at_started else None
+
+    _module("homeassistant.helpers.start", async_at_started=at_started)
+
+    class Store:
+        """helpers/storage.py Store, kept in hass.storage so a second reporter on the same hass
+        (a reload or a restart) reads what the first wrote. async_delay_save writes at once."""
+
+        def __init__(self, hass, version, key, private=False, *, atomic_writes=False, encoder=None,
+                     minor_version=1, read_only=False, serialize_in_event_loop=True, max_readable_version=None):
+            assert isinstance(version, int) and isinstance(key, str) and key
+            self.hass, self.key = hass, key
+
+        async def async_load(self):
+            if self.key in self.hass.storage_broken:
+                raise ValueError("unreadable")
+            return self.hass.storage.get(self.key)
+
+        async def async_save(self, data):
+            self.hass.storage[self.key] = data
+
+        def async_delay_save(self, data_func, delay=0):
+            self.hass.storage[self.key] = data_func()
+
+        async def async_remove(self):
+            self.hass.storage.pop(self.key, None)
+
+    _module("homeassistant.helpers.storage", Store=Store)
+
+    select_modes = enum.Enum("SelectSelectorMode", {"LIST": "list", "DROPDOWN": "dropdown"})
+
     # Selector configs are TypedDicts in Home Assistant: a wrong key is refused there, and here.
+    # A select's mode is checked against the enum, as its schema does (helpers/selector.py).
     def typed(name, *keys):
         def make(**config):
             unknown = set(config) - set(keys)
             assert not unknown, f"{name} has no {sorted(unknown)}"
+            if "mode" in config and name == "select":
+                mode = config["mode"]
+                assert mode in select_modes or mode in [m.value for m in select_modes], f"no select mode {mode!r}"
             return {"selector": name, **config}
         return make
 
@@ -251,7 +356,7 @@ def install():
             SelectSelectorConfig=typed("select", "options", "multiple", "custom_value", "mode",
                                        "translation_key", "sort", "read_only"),
             SelectOptionDict=lambda *, value, label: {"value": value, "label": label},
-            SelectSelectorMode=enum.Enum("SelectSelectorMode", "LIST DROPDOWN"),
+            SelectSelectorMode=select_modes,
             EntitySelector=lambda config=None: config, SelectSelector=lambda config=None: config,
             BooleanSelector=lambda config=None: {"selector": "boolean"})
     _module("homeassistant.helpers.entity_registry",

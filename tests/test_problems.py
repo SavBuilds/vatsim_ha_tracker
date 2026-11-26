@@ -409,5 +409,37 @@ class Texts(unittest.TestCase):
             self.assertEqual(problems.PUSH_TITLES[key], issues[key]["title"], key)
 
 
+
+class PushedRecord(unittest.TestCase):
+    def test_a_problem_pushed_before_the_restart_is_not_pushed_when_raised_again(self):
+        record = problems.PushRecord(["navdata_expired"], T0)
+        self.assertFalse(record.should_push("navdata_expired"))
+        self.assertFalse(record.raised("navdata_expired"))                  # already stored: nothing to write
+        self.assertTrue(record.should_push("feed_stale"))
+        self.assertTrue(record.raised("feed_stale"))
+        self.assertFalse(record.should_push("feed_stale"))
+        self.assertEqual(record.keys(), ["feed_stale", "navdata_expired"])
+
+    def test_a_problem_seen_to_clear_is_pushed_when_it_comes_back(self):
+        record = problems.PushRecord([], T0)
+        record.raised("feed_stale")
+        self.assertTrue(record.cleared("feed_stale"))
+        self.assertTrue(record.should_push("feed_stale"))
+        self.assertFalse(record.cleared("feed_stale"))                      # nothing left to clear
+
+    def test_a_carried_problem_not_raised_again_within_the_longest_hold_is_forgotten(self):
+        self.assertGreater(problems.PUSH_RECORD_CARRY_SECONDS, problems.HOLD_STILL_LOADING)
+        record = problems.PushRecord(["boundaries_not_loaded", "feed_stale"], T0)
+        record.raised("feed_stale")                                         # raised again: stays
+        self.assertFalse(record.expire(T0 + problems.PUSH_RECORD_CARRY_SECONDS - 1))
+        self.assertFalse(record.should_push("boundaries_not_loaded"))
+        self.assertTrue(record.expire(T0 + problems.PUSH_RECORD_CARRY_SECONDS))
+        self.assertTrue(record.should_push("boundaries_not_loaded"))         # fixed while down: a new fault pushes
+        self.assertFalse(record.should_push("feed_stale"))
+        self.assertFalse(record.expire(T0 + 10 * problems.PUSH_RECORD_CARRY_SECONDS))
+
+    def test_a_damaged_record_keeps_only_text_keys(self):
+        self.assertEqual(problems.PushRecord(["feed_stale", 3, None], T0).keys(), ["feed_stale"])
+
 if __name__ == "__main__":
     unittest.main()

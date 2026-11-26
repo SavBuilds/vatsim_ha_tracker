@@ -147,5 +147,35 @@ class Strings(unittest.TestCase):
         self.assertEqual(sorted(strings["options"]["step"]["init"]["menu_options"]), ["alerts", "sources"])
 
 
+
+class TurnComes(unittest.TestCase):
+    def test_an_atis_change_waiting_is_dropped_once_the_flight_or_session_ends(self):
+        on, off = ("on", {}), ("off", {})
+        connected = destination("in_range", "ZZDD", "B")
+        self.assertTrue(rules.still_due(rules.ATIS_CHANGE, {rules.PILOT_CONNECTED: on, rules.DESTINATION: connected}))
+        self.assertFalse(rules.still_due(rules.ATIS_CHANGE, {rules.PILOT_CONNECTED: off, rules.DESTINATION: connected}))
+        self.assertFalse(rules.still_due(rules.ATIS_CHANGE, {
+            rules.PILOT_CONNECTED: on, rules.DESTINATION: destination("in_range", "ZZDD", "B", session="ended")}))
+        self.assertFalse(rules.still_due(rules.ATIS_CHANGE, {}))
+        for kind in (rules.CONTROLLER_ONLINE, rules.NEXT_CONTROLLER):
+            self.assertTrue(rules.still_due(kind, {}))       # their own checks ran when they were made
+
+
+class PackageChoices(unittest.TestCase):
+    def test_the_package_mode_labels_map_to_the_modes(self):
+        self.assertEqual({label: rules.legacy_mode(label) for label in
+                          ("Disabled", "Push + Speaker", "Push Only", "Speaker Only")},
+                         {"Disabled": "disabled", "Push + Speaker": "push_and_speaker", "Push Only": "push_only",
+                          "Speaker Only": "speaker_only"})
+        for unreadable in (None, "unavailable", "unknown", "push_only"):
+            self.assertIsNone(rules.legacy_mode(unreadable), unreadable)
+
+    def test_each_alert_reads_its_own_package_switch(self):
+        self.assertEqual(rules.LEGACY_SWITCHES, {
+            rules.CONTROLLER_ONLINE: "input_boolean.vatsim_alerts_immediate",
+            rules.NEXT_CONTROLLER: "input_boolean.vatsim_alerts_lookahead",
+            rules.ATIS_CHANGE: "input_boolean.vatsim_alerts_atis"})
+        self.assertEqual([rules.legacy_switch(s) for s in ("on", "off", "unavailable", None)], [True, False, None, None])
+
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,7 @@ suspended does not count toward a hold either.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 # Seconds a condition must hold before it is reported.
 HOLD_FEED_UNREACHABLE = 600
@@ -201,3 +201,46 @@ class ProblemWatch:
         if delivery_error:
             found[ALERT_DELIVERY_FAILED] = {"error": delivery_error}
         return found
+
+
+# A repair already pushed is not pushed again when a reload or restart raises it again: the
+# issues are not persistent, so without a record every reload re-announces a lasting fault.
+# A key carried over from before the start is kept only until it is raised again, or until
+# this long after the start, longer than the longest hold: a fault fixed while Home Assistant
+# was down must not silence the next one.
+PUSH_RECORD_CARRY_SECONDS = HOLD_STILL_LOADING + 300
+
+
+class PushRecord:
+    """Which problems have been pushed during the fault that is still going on."""
+
+    def __init__(self, carried: Iterable[str], started: float) -> None:
+        self._carried = {k for k in carried if isinstance(k, str)}
+        self._live: set = set()
+        self._started = started
+
+    def should_push(self, key: str) -> bool:
+        return key not in self._carried and key not in self._live
+
+    def raised(self, key: str) -> bool:
+        """The problem was raised in this run. True when the stored keys changed."""
+        changed = self.should_push(key)
+        self._carried.discard(key)
+        self._live.add(key)
+        return changed
+
+    def cleared(self, key: str) -> bool:
+        """The problem was seen to clear: the next time it is a new fault, and is pushed."""
+        changed = key in self._carried or key in self._live
+        self._carried.discard(key)
+        self._live.discard(key)
+        return changed
+
+    def expire(self, now: float) -> bool:
+        if self._carried and now - self._started >= PUSH_RECORD_CARRY_SECONDS:
+            self._carried.clear()
+            return True
+        return False
+
+    def keys(self) -> List[str]:
+        return sorted(self._carried | self._live)

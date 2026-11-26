@@ -136,13 +136,18 @@ The dashboard in this release does not yet draw the METAR on the ATIS card; the 
 
 Alerts are part of the integration. There is nothing to copy and no YAML to edit.
 
-- **What is announced:** a controller came online covering you (after 20 seconds, so one who logs straight off again is not announced), the next controller ahead on your track changed, the ATIS letter at the airport on the ATIS card changed.
+- **What is announced:** a controller came online covering you (after 20 seconds, so one who logs straight off again is not announced), the next controller ahead on your track changed, the ATIS letter at the airport on the ATIS card changed. Announcements play one at a time: one that arrives while another is playing waits, and is checked again (its switch, the mode, whether you are still connected) before it plays.
 - **Out of the box** alerts are pushed as a notice in the Home Assistant sidebar.
 - **To send them to your phone or to speakers:** Settings > Devices & services > VATSIM ATC Tracker > Configure > Alerts. Choose where pushes go, which speakers, the text-to-speech engine, and optionally an entity that holds speech while it is on (pushes still go, and say speech was held).
 - **Day to day,** on the VATSIM Tracker device: **Alert mode** (Disabled, Push and speakers, Push only, Speakers only), a switch for each of the three alerts, a switch for each speaker you chose, and **Test alert**, which sends a push and speech through everything you set, without a flight.
-- **Problems are pushed too,** whenever a repair is raised and whatever the alert mode, so switching alerts off never hides a fault. Turn that off under Configure > Alerts if something else already tells you about repairs.
+- **Problems are pushed too,** once when a repair is raised and whatever the alert mode, so switching alerts off never hides a fault. A repair still raised after a reload or restart is not pushed again; it is pushed again only if it clears and comes back. Turn that off under Configure > Alerts if something else already tells you about repairs.
 
-**Upgrading from 2.0.0b10 or earlier with the alerts package installed:** delete `packages/vatsim.yaml` and `packages/vatsim_user.yaml` from your configuration folder, set your targets under Configure > Alerts, and restart. With both in place every alert arrives twice. The package's helpers (`input_select.vatsim_alert_mode`, the `input_boolean.vatsim_*` switches) go with it; the dashboard file in this release uses the new entities.
+**Upgrading from 2.0.0b10 or earlier with the alerts package installed:**
+
+1. Update and restart once with the package still in place. On that first start the integration copies the package's alert mode and its three alert switches into its own controls. It does this only for controls that have never been saved, so it never overrides a choice made on the new controls.
+2. Under Configure > Alerts, choose your push targets, speakers, text-to-speech engine and hold entity. Speaker choices cannot be copied: the package named its speaker switches by room, the integration names them by media player. Each speaker you choose gets a switch that starts on; switch off the ones you had off.
+3. Delete `packages/vatsim.yaml` and `packages/vatsim_user.yaml` from your configuration folder and restart. Until then every alert arrives twice.
+4. A dashboard made from an earlier dashboard file still points at the package's helpers (`input_select.vatsim_alert_mode`, the `input_boolean.vatsim_*` switches), which are gone now. Replace its contents with this release's file as in **Dashboard** above, or point its cards at the new controls on the VATSIM Tracker device. Check any automation, script or button that called `script.vatsim_announce` or `script.vatsim_cycle_alert_mode` as well: those scripts went with the package.
 
 ---
 
