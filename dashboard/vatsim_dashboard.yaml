@@ -502,7 +502,7 @@ views:
       heading_style: subtitle
       icon: mdi:bell-cog
     - type: tile
-      entity: input_select.vatsim_alert_mode
+      entity: select.vatsim_tracker_alert_mode
       name: Alert mode
       features_position: bottom
       features:
@@ -513,15 +513,17 @@ views:
       show_header_toggle: false
       state_color: true
       entities:
-      - entity: input_boolean.vatsim_alerts_immediate
+      - entity: switch.vatsim_tracker_alert_controller_online
         name: ATC Online Alerts
-      - entity: input_boolean.vatsim_alerts_lookahead
+      - entity: switch.vatsim_tracker_alert_next_controller
         name: Lookahead Alerts
-      - entity: input_boolean.vatsim_alerts_atis
+      - entity: switch.vatsim_tracker_alert_atis_change
         name: ATIS Change Alerts
+      - entity: button.vatsim_tracker_test_alert
+        name: Send a test alert
     - type: markdown
       text_only: true
-      content: '**Alert mode** chooses where announcements go: Push is a notification, Speaker is speech on the speakers switched on under Speaker Targets. **ATC Online** announces a controller coming online over your position. **Lookahead** announces the next controller ahead on your track. **ATIS Change** announces a new ATIS letter at the airport on the ATIS card. Feed and tracker health pushes are always sent, whatever the mode.'
+      content: '**Alert mode** chooses where announcements go: Push is a notification, Speaker is speech on the speakers switched on under Speaker Targets. **ATC Online** announces a controller coming online over your position. **Lookahead** announces the next controller ahead on your track. **ATIS Change** announces a new ATIS letter at the airport on the ATIS card. Problems with the feed or the tracker are raised as repairs and pushed whatever the mode. Where pushes go, and which speakers exist, is set under the integration''s Configure button.'
       grid_options:
         columns: full
   - type: grid
@@ -530,20 +532,9 @@ views:
       heading: Speaker Targets
       heading_style: subtitle
       icon: mdi:speaker-multiple
-    - type: custom:button-card
-      template: vatsim_speaker
-      entity: input_boolean.vatsim_speaker_1
-      name: Speaker 1
-      icon: mdi:speaker
+    - type: markdown
+      text_only: true
+      content: 'Each speaker chosen under the integration''s Configure button has a switch named **Announce on ...** on the VATSIM Tracker device. Add those switches here: their entity ids depend on your speakers'' names.'
       grid_options:
-        columns: 4
-        rows: 1
-    - type: custom:button-card
-      template: vatsim_speaker
-      entity: input_boolean.vatsim_speaker_2
-      name: Speaker 2
-      icon: mdi:speaker
-      grid_options:
-        columns: 4
-        rows: 1
+        columns: full
   cards: []

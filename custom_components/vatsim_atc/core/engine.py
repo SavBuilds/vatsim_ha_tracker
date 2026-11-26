@@ -720,6 +720,9 @@ class VatsimAtcEngine:
         # time.monotonic() of the last health check that ran to its end. Read from another
         # thread by the host's problem reporter; a plain float, so the read is safe.
         self.last_health_check: Optional[float] = None
+        # Set when a saved aircraft position exists but could not be used. Cleared by the
+        # next successful save. No file at all is a new install, not an error.
+        self._last_aircraft_restore_error: Optional[str] = None
 
         self._navdata: Optional[NavDataSnapshot] = None
         self._navdata_version_counter = 0
@@ -1715,9 +1718,21 @@ class VatsimAtcEngine:
             return "configured_but_empty"
         # Past the AIRAC validity end date (UTC). The data is still used for
         # the route line; this only makes the age visible and alertable.
-        if self._navdata.valid_until and datetime.now(timezone.utc).date().isoformat() > self._navdata.valid_until:
+        if self._navdata_days_expired() > 0:
             return "expired"
         return "active"
+
+    def _navdata_days_expired(self) -> int:
+        """Whole days since the last day the loaded cycle was valid, by the UTC date. 0 while
+        it is valid, or when the data carries no end date."""
+        valid_until = self._navdata.valid_until if self._navdata else None
+        if not valid_until:
+            return 0
+        try:
+            last_day = datetime.strptime(valid_until, "%Y-%m-%d").date()
+        except ValueError:
+            return 0
+        return max(0, (datetime.now(timezone.utc).date() - last_day).days)
 
     def _publish_feed_health(
         self, health: FeedHealth, now: float,
@@ -1749,6 +1764,7 @@ class VatsimAtcEngine:
             "navdata_status": self._compute_navdata_status(),
             "navdata_cycle": self._navdata.cycle if self._navdata else None,
             "navdata_valid_until": self._navdata.valid_until if self._navdata else None,
+            "navdata_days_expired": self._navdata_days_expired(),
             "navdata_snapshot_version": self._navdata.version if self._navdata else None,
             "navdata_load_issue_count": self._navdata.load_issue_count if self._navdata else 0,
             # Set when a load or refresh failed and the previous snapshot (if any) was kept:
@@ -1775,6 +1791,7 @@ class VatsimAtcEngine:
             "metar_source_last": self._metar_source_last,
             "last_metar_error": self._last_metar_error,
             "last_metar_error_ts": self._last_metar_error_ts,
+            "last_aircraft_restore_error": self._last_aircraft_restore_error,
             # Entities HA has not accepted after repeated republishes. A zero count
             # and an empty string are dropped in publication; readers use | int(0).
             "publish_unverified_count": len(self._publish_failing()),
@@ -1866,6 +1883,7 @@ class VatsimAtcEngine:
                 json.dump({"saved_at": now, "attributes": self._last_aircraft_attrs}, fh)
             os.replace(tmp, path)  # atomic, so a crash mid-write cannot leave a torn file
             self._last_aircraft_persisted_ts = now
+            self._last_aircraft_restore_error = None   # the file is good again
         except OSError as exc:
             self.log(f"Could not persist last aircraft state to {path}: {exc}", level="WARNING")
 
@@ -1879,6 +1897,7 @@ class VatsimAtcEngine:
                      f"until the next flight", level="INFO")
             return None
         except (OSError, ValueError) as exc:
+            self._last_aircraft_restore_error = f"{type(exc).__name__}: {exc}"
             self.log(f"Could not read saved aircraft position {path}: {exc}", level="WARNING")
             return None
         attrs = data.get("attributes") if isinstance(data, dict) else None
@@ -1889,6 +1908,7 @@ class VatsimAtcEngine:
         except (TypeError, KeyError, ValueError):
             valid = False
         if not valid:
+            self._last_aircraft_restore_error = "the saved file holds no valid position"
             self.log(f"Saved aircraft position in {path} is malformed; ignoring it", level="WARNING")
             return None
         saved_cid = attrs.get("cid")

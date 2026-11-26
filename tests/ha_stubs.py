@@ -4,6 +4,7 @@ with these shows the integration is consistent with itself, NOT that it is corre
 real Home Assistant. Only loading it in Home Assistant shows that."""
 import asyncio
 import enum
+import functools
 import sys
 import types
 
@@ -63,11 +64,26 @@ class ConfigEntry:
         return lambda: None
 
 
+def mark_callback(func):
+    """Home Assistant's @callback: it only marks the function."""
+    setattr(func, "_hass_callback", True)
+    return func
+
+
+def runs_on_the_loop(target):
+    """Home Assistant runs a job on the event loop only if it is a coroutine function or is
+    marked @callback, looking through functools.partial. Anything else goes to a worker thread."""
+    while isinstance(target, functools.partial):
+        target = target.func
+    return asyncio.iscoroutinefunction(target) or getattr(target, "_hass_callback", False)
+
+
 class _Dispatcher:
     def __init__(self):
         self.targets = {}
 
     def connect(self, hass, signal, target):
+        assert runs_on_the_loop(target), f"{target!r} would run in a worker thread"
         self.targets.setdefault(signal, []).append(target)
         return lambda: self.targets[signal].remove(target)
 
@@ -78,9 +94,77 @@ class _Dispatcher:
 
 class Platform(str, enum.Enum):
     BINARY_SENSOR = "binary_sensor"
+    BUTTON = "button"
     DEVICE_TRACKER = "device_tracker"
+    SELECT = "select"
     SENSOR = "sensor"
+    SWITCH = "switch"
     TEXT = "text"
+
+
+class OptionsFlow:
+    """The three results an options flow can return, as plain dicts. config_entry and hass are
+    set by the test, as Home Assistant sets them."""
+
+    def async_show_menu(self, *, step_id=None, menu_options, sort=False, description_placeholders=None):
+        return {"type": "menu", "step_id": step_id, "menu_options": list(menu_options)}
+
+    def async_show_form(self, *, step_id=None, data_schema=None, errors=None, description_placeholders=None,
+                        last_step=None, preview=None):
+        return {"type": "form", "step_id": step_id, "data_schema": data_schema, "errors": errors or {}}
+
+    def async_create_entry(self, *, title=None, data=None, description=None, description_placeholders=None):
+        return {"type": "create_entry", "data": data}
+
+
+class State:
+    def __init__(self, entity_id, state, name=None):
+        self.entity_id, self.state = entity_id, state
+        self.name = name or entity_id.partition(".")[2].replace("_", " ").title()
+
+
+class States:
+    def __init__(self):
+        self.all = {}
+
+    def set(self, entity_id, state, name=None):
+        self.all[entity_id] = State(entity_id, state, name)
+
+    def get(self, entity_id):
+        return self.all.get(entity_id)
+
+    def async_all(self, domain_filter=None):
+        return [s for s in self.all.values() if domain_filter is None or s.entity_id.split(".")[0] == domain_filter]
+
+
+class Services:
+    """Records calls. A (domain, service) put in .failing raises, as a missing or broken action would."""
+
+    def __init__(self, notify=("persistent_notification", "send_message", "notify")):
+        self.calls, self.failing, self.notify = [], {}, list(notify)
+
+    async def async_call(self, domain, service, service_data=None, blocking=False, context=None, target=None,
+                         return_response=False):
+        self.calls.append((domain, service, dict(service_data or {})))
+        if (domain, service) in self.failing:
+            raise self.failing[(domain, service)]
+
+    def async_services_for_domain(self, domain):
+        return {name: object() for name in self.notify} if domain == "notify" else {}
+
+
+class RegistryEntry:
+    def __init__(self, entity_id, unique_id):
+        self.entity_id, self.unique_id, self.domain = entity_id, unique_id, entity_id.split(".")[0]
+
+
+class EntityRegistry:
+    def __init__(self):
+        self.entries, self.removed = {}, []
+
+    def async_remove(self, entity_id):
+        self.removed.append(entity_id)
+        self.entries.pop(entity_id, None)
 
 
 def install():
@@ -89,16 +173,23 @@ def install():
     dispatcher = _Dispatcher()
     _module("aiohttp", ClientTimeout=lambda total=None: ("timeout", total))
     marker = lambda *a, **k: (a, tuple(sorted(k)))  # noqa: E731
-    _module("voluptuous", Schema=lambda schema: schema, Required=marker, Optional=marker, All=marker,
+
+    class Key(str):
+        """A schema key that keeps its default, so a test can read what a form would show."""
+        def __new__(cls, name, default=None, description=None):
+            key = super().__new__(cls, name)
+            key.default, key.description = default, description
+            return key
+    _module("voluptuous", Schema=lambda schema: schema, Required=Key, Optional=Key, All=marker,
             Coerce=marker, Range=marker)
     ha = _module("homeassistant")
     ha.dispatcher_stub = dispatcher
     _module("homeassistant.config_entries", ConfigEntry=ConfigEntry, ConfigFlow=ConfigFlow,
-            ConfigFlowResult=dict, OptionsFlow=type("OptionsFlow", (), {}))
+            ConfigFlowResult=dict, OptionsFlow=OptionsFlow)
     _module("homeassistant.const", Platform=Platform, EVENT_HOMEASSISTANT_STOP="homeassistant_stop",
             STATE_UNKNOWN="unknown", STATE_UNAVAILABLE="unavailable",
             EntityCategory=enum.Enum("EntityCategory", "CONFIG DIAGNOSTIC"))
-    _module("homeassistant.core", HomeAssistant=object, Event=object, callback=lambda f: f)
+    _module("homeassistant.core", HomeAssistant=object, Event=object, callback=mark_callback)
     _module("homeassistant.exceptions", ConfigEntryError=type("ConfigEntryError", (Exception,), {}))
     _module("homeassistant.helpers")
     _module("homeassistant.helpers.aiohttp_client", async_get_clientsession=lambda hass: hass.session)
@@ -134,10 +225,39 @@ def install():
             async_delete_issue=delete_issue, IssueSeverity=enum.Enum("IssueSeverity", "CRITICAL ERROR WARNING"))
 
     def track_interval(hass, action, interval):
+        assert runs_on_the_loop(action), f"{action!r} would run in a worker thread"
         hass.intervals.append((action, interval))
         return lambda: hass.intervals.remove((action, interval))
 
-    _module("homeassistant.helpers.event", async_track_time_interval=track_interval)
+    def call_later(hass, delay, action):
+        assert runs_on_the_loop(action), f"{action!r} would run in a worker thread"
+        entry = (delay, action)
+        hass.later.append(entry)
+        return lambda: hass.later.remove(entry) if entry in hass.later else None
+
+    _module("homeassistant.helpers.event", async_track_time_interval=track_interval, async_call_later=call_later)
+
+    # Selector configs are TypedDicts in Home Assistant: a wrong key is refused there, and here.
+    def typed(name, *keys):
+        def make(**config):
+            unknown = set(config) - set(keys)
+            assert not unknown, f"{name} has no {sorted(unknown)}"
+            return {"selector": name, **config}
+        return make
+
+    _module("homeassistant.helpers.selector",
+            EntitySelectorConfig=typed("entity", "exclude_entities", "include_entities", "multiple", "reorder",
+                                       "filter", "integration", "domain", "device_class", "read_only"),
+            SelectSelectorConfig=typed("select", "options", "multiple", "custom_value", "mode",
+                                       "translation_key", "sort", "read_only"),
+            SelectOptionDict=lambda *, value, label: {"value": value, "label": label},
+            SelectSelectorMode=enum.Enum("SelectSelectorMode", "LIST DROPDOWN"),
+            EntitySelector=lambda config=None: config, SelectSelector=lambda config=None: config,
+            BooleanSelector=lambda config=None: {"selector": "boolean"})
+    _module("homeassistant.helpers.entity_registry",
+            async_get=lambda hass: hass.entity_registry,
+            async_entries_for_config_entry=lambda registry, entry_id: [
+                e for e in registry.entries.values() if e.unique_id.startswith(entry_id + "_")])
     _module("homeassistant.helpers.entity_platform", AddEntitiesCallback=object)
     _module("homeassistant.helpers.restore_state", RestoreEntity=RestoreEntity)
     _module("homeassistant.components")
@@ -150,4 +270,7 @@ def install():
             TrackerEntity=type("TrackerEntity", (Entity,), {}))
     _module("homeassistant.components.text", TextEntity=type("TextEntity", (Entity,), {}),
             TextMode=enum.Enum("TextMode", "TEXT"))
+    _module("homeassistant.components.select", SelectEntity=type("SelectEntity", (Entity,), {}))
+    _module("homeassistant.components.switch", SwitchEntity=type("SwitchEntity", (Entity,), {}))
+    _module("homeassistant.components.button", ButtonEntity=type("ButtonEntity", (Entity,), {}))
     return dispatcher

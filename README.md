@@ -6,7 +6,7 @@ It is a custom integration: one install, one setup dialog that asks for your VAT
 
 Needs Home Assistant 2026.10 or later.
 
-**Status: beta (2.0.0b10).** Version 2 is a rewrite of this project as a Home Assistant integration. The tracking logic is the same as version 1, the AppDaemon app, and was compared against it on live data. The Home Assistant side is new. Expect rough edges and please report them.
+**Status: beta (2.0.0b11).** Version 2 is a rewrite of this project as a Home Assistant integration. The tracking logic is the same as version 1, the AppDaemon app, and was compared against it on live data. The Home Assistant side is new. Expect rough edges and please report them.
 
 ![The dashboard in flight](docs/images/dashboard_main.png)
 
@@ -42,7 +42,10 @@ Needs Home Assistant 2026.10 or later.
 
 **Health**
 - One diagnostic sensor reports feed age, the state of boundaries, navigation data and NAT tracks, the navigation data cycle and its expiry, and the last errors. Everything fails soft and says so there.
-- Problems you should know about are raised as **Repairs** (Settings > System > Repairs) with no setup: the feed cannot be reached or has gone stale, the tracker has stopped, sector boundaries or navigation data did not load, navigation data has expired. Each one says what to check and clears itself when the problem is gone.
+- Problems you should know about are raised as **Repairs** (Settings > System > Repairs) with no setup: the feed cannot be reached or has gone stale, the tracker has stopped, sector boundaries or navigation data did not load, navigation data has expired, METAR lookups keep failing, an alert could not be delivered. Each one says what to check and clears itself when the problem is gone.
+
+**Alerts**
+- Pushed and spoken, with no YAML: a controller came online covering you, the next controller ahead changed, the ATIS letter changed. See "Alerts" below.
 
 ---
 
@@ -123,38 +126,29 @@ Things worth knowing when you write automations:
 2. Settings > Dashboards > Add dashboard > New dashboard from scratch.
 3. Open it, choose Edit, then the three dots > Raw configuration editor, replace everything with the file's contents, and save.
 
-The second view, **Alerts**, uses helpers from the optional alerts package below. Delete that view if you do not install the package.
+The second view, **Alerts**, shows the alert mode, the switch for each alert and the test button. They exist on every install.
 
 The dashboard in this release does not yet draw the METAR on the ATIS card; the attributes are there if you want to add it.
 
 ---
 
-## Alerts and watchdogs (optional)
+## Alerts
 
-The integration itself only provides entities. `packages/` holds a Home Assistant package that adds:
+Alerts are part of the integration. There is nothing to copy and no YAML to edit.
 
-- spoken and pushed alerts: a controller came online covering you, the next controller ahead, the ATIS letter changed;
-- an alert mode (`Disabled`, `Push + Speaker`, `Push Only`, `Speaker Only`), per-speaker switches and an optional mute gate;
-- watchdogs that tell you when the feed cannot be fetched, the tracker stops publishing, navigation data is missing or expired, or the aircraft position is lost. These ignore the alert mode, so silencing announcements never silences a failure.
+- **What is announced:** a controller came online covering you (after 20 seconds, so one who logs straight off again is not announced), the next controller ahead on your track changed, the ATIS letter at the airport on the ATIS card changed.
+- **Out of the box** alerts are pushed as a notice in the Home Assistant sidebar.
+- **To send them to your phone or to speakers:** Settings > Devices & services > VATSIM ATC Tracker > Configure > Alerts. Choose where pushes go, which speakers, the text-to-speech engine, and optionally an entity that holds speech while it is on (pushes still go, and say speech was held).
+- **Day to day,** on the VATSIM Tracker device: **Alert mode** (Disabled, Push and speakers, Push only, Speakers only), a switch for each of the three alerts, a switch for each speaker you chose, and **Test alert**, which sends a push and speech through everything you set, without a flight.
+- **Problems are pushed too,** whenever a repair is raised and whatever the alert mode, so switching alerts off never hides a fault. Turn that off under Configure > Alerts if something else already tells you about repairs.
 
-To use it:
-
-1. Enable packages if you have not already. In `configuration.yaml`:
-   ```yaml
-   homeassistant:
-     packages: !include_dir_named packages
-   ```
-2. Copy `packages/vatsim.yaml` to `config/packages/vatsim.yaml`. Do not edit it.
-3. Copy `packages/vatsim_user.example.yaml` to `config/packages/vatsim_user.yaml` and edit its four numbered sections: your speaker switches, the optional mute gate, where pushes go (the default is a notice in the sidebar; change it to `notify.mobile_app_<device>` for your phone), and your TTS entity with the speaker map.
-4. Take a backup, then Developer Tools > YAML > Check configuration, then restart.
-
-On a new install the "aircraft position missing" watchdog reports before your first flight, because there is no saved position yet. It clears when you first connect.
+**Upgrading from 2.0.0b10 or earlier with the alerts package installed:** delete `packages/vatsim.yaml` and `packages/vatsim_user.yaml` from your configuration folder, set your targets under Configure > Alerts, and restart. With both in place every alert arrives twice. The package's helpers (`input_select.vatsim_alert_mode`, the `input_boolean.vatsim_*` switches) go with it; the dashboard file in this release uses the new entities.
 
 ---
 
 ## Troubleshooting
 
-- **A repair named "VATSIM ..." appeared.** Open it: it says what is wrong and what to check, and it disappears by itself once fixed. Each is raised after a delay, so a slow start or one missed download raises nothing: feed not reachable since start 10 minutes; feed not updating 3 minutes while you are connected and 15 otherwise; tracker stopped 5 minutes; processing, boundary and navigation data failures 5 minutes after the failure, or 30 minutes for a first load that is still running; expired navigation data at once. The delays are counted from when the integration first notices the condition, and it checks every 30 seconds, so a repair can appear up to a minute later than these figures. Reloading the integration clears its repairs, and any that still apply come back after the same delay: something that reloads it every few minutes, such as a "self-healing" automation, keeps them from ever appearing.
+- **A repair named "VATSIM ..." appeared.** Open it: it says what is wrong and what to check, and it disappears by itself once fixed. Each is raised after a delay, so a slow start or one missed download raises nothing: feed not reachable since start 10 minutes; feed not updating 3 minutes while you are connected and 15 otherwise; tracker stopped 5 minutes; processing, boundary and navigation data failures 5 minutes after the failure, or 30 minutes for a first load that is still running; expired navigation data on the second day after the cycle's last day. The delays are counted from when the integration first notices the condition, and it checks every 30 seconds, so a repair can appear up to a minute later than these figures. Reloading the integration clears its repairs, and any that still apply come back after the same delay: something that reloads it every few minutes, such as a "self-healing" automation, keeps the ones that have a delay from ever appearing.
 - **Feed health is not `healthy`.** Open the entity: the attributes name what is wrong and carry the last error text.
 - **No route line.** `navdata_status` on the feed health sensor says whether navigation data is `active`, `disabled` (no folder set), `configured_but_empty` (the folder holds none of the four files) or `expired`.
 - **An approach controller alone reads as uncontrolled.** `app_dep_status` is not `active`: no SimAware file is set, or it could not be read.
@@ -190,7 +184,7 @@ Version 1 is still available on the `appdaemon` branch and as the `v1.0.0-rc2` p
 Version 2 needs no AppDaemon, no Python packages and no `apps.yaml`. To move over:
 
 1. Install and set up the integration as above. It runs beside the AppDaemon app; the two do not interfere.
-2. The entity ids changed: `sensor.vatsim_feed_health` is now `sensor.vatsim_tracker_feed_health`, and likewise for the other eight. `input_text.vatsim_atis_airport` is now `text.vatsim_tracker_atis_airport`. Replace `packages/vatsim.yaml` and the dashboard with the files from this version; your `vatsim_user.yaml` carries over unchanged.
+2. The entity ids changed: `sensor.vatsim_feed_health` is now `sensor.vatsim_tracker_feed_health`, and likewise for the other eight. `input_text.vatsim_atis_airport` is now `text.vatsim_tracker_atis_airport`. Delete `packages/vatsim.yaml` and `packages/vatsim_user.yaml` (alerts are now set under the integration's Configure button) and replace the dashboard with the file from this version.
 3. Paths change from the AppDaemon container's view (`/homeassistant/vatsim/navdata`) to Home Assistant's (`/config/vatsim/navdata`).
 4. Attributes now have real types. A template written for the old quirk, where `true` arrived as a string and `false` or `0` was missing, should be checked.
 5. Once a flight looks right, stop the AppDaemon add-on.

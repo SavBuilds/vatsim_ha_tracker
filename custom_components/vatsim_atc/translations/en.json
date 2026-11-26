@@ -19,7 +19,15 @@
   "options": {
     "step": {
       "init": {
-        "title": "VATSIM ATC Tracker options",
+        "title": "VATSIM ATC Tracker",
+        "description": "Everything here is optional.",
+        "menu_options": {
+          "sources": "Data sources",
+          "alerts": "Alerts"
+        }
+      },
+      "sources": {
+        "title": "Data sources",
         "description": "All optional. Paths are as Home Assistant sees them, for example /config/vatsim/navdata.",
         "data": {
           "navdata_path": "Navigation data folder (X-Plane 12 format)",
@@ -27,10 +35,29 @@
           "lookahead_minutes": "Lookahead (minutes)",
           "metar_fallback": "Show the METAR when an airport has no ATIS"
         }
+      },
+      "alerts": {
+        "title": "Alerts",
+        "description": "Where flight alerts and problem reports go. Which alerts are on, and which speakers, are switches on the VATSIM Tracker device. Its Test alert button sends one through everything set here.",
+        "data": {
+          "notify_targets": "Send pushes to",
+          "speakers": "Speakers",
+          "tts_entity": "Text-to-speech engine",
+          "mute_gate_entity": "Hold speech while this is on",
+          "push_repairs": "Also push when a repair is raised"
+        },
+        "data_description": {
+          "notify_targets": "Notify actions and notify entities found on this system. The sidebar notice and the phone app actions (their names contain mobile_app) replace an earlier notice about the same problem; the others get a new one each time.",
+          "speakers": "Each one gets a switch on the device, so you can choose rooms without coming back here.",
+          "tts_entity": "Needed if any speaker is chosen.",
+          "mute_gate_entity": "Optional. Speech plays only while this entity reads off. Pushes still go, and say that speech was held.",
+          "push_repairs": "Sent whatever the alert mode is, so switching alerts off never hides a fault."
+        }
       }
     },
     "error": {
-      "path_not_found": "Home Assistant cannot see that path."
+      "path_not_found": "Home Assistant cannot see that path.",
+      "tts_needed": "Choose a text-to-speech engine, or remove the speakers."
     }
   },
   "entity": {
@@ -42,9 +69,25 @@
         "name": "ATC coverage"
       }
     },
+    "button": {
+      "test_alert": {
+        "name": "Test alert"
+      }
+    },
     "device_tracker": {
       "aircraft": {
         "name": "Aircraft"
+      }
+    },
+    "select": {
+      "alert_mode": {
+        "name": "Alert mode",
+        "state": {
+          "disabled": "Disabled",
+          "push_and_speaker": "Push and speakers",
+          "push_only": "Push only",
+          "speaker_only": "Speakers only"
+        }
       }
     },
     "sensor": {
@@ -65,6 +108,20 @@
       },
       "session_track": {
         "name": "Session track"
+      }
+    },
+    "switch": {
+      "alert_controller_online": {
+        "name": "Alert: controller online"
+      },
+      "alert_next_controller": {
+        "name": "Alert: next controller"
+      },
+      "alert_atis_change": {
+        "name": "Alert: ATIS change"
+      },
+      "speaker": {
+        "name": "Announce on {name}"
       }
     },
     "text": {
@@ -100,7 +157,23 @@
     },
     "navdata_expired": {
       "title": "VATSIM navigation data has expired",
-      "description": "The navigation data in use is AIRAC cycle {cycle}, valid until {valid_until}. The route line may use fixes or airways that have since changed.\n\nUpdate the files in the navigation data folder. The integration notices changed files within the hour.\n\nThis clears by itself when newer data loads."
+      "description": "The navigation data in use is AIRAC cycle {cycle}. Its last day was {valid_until} (UTC). The route line may use fixes or airways that have since changed.\n\nUpdate the files in the navigation data folder when you have the newer cycle. The integration notices changed files within the hour.\n\nThis clears by itself when newer data loads."
+    },
+    "metar_failing": {
+      "title": "VATSIM METAR lookups are failing",
+      "description": "The destination has no ATIS, so the tracker asked for a METAR, and both sources (VATSIM and aviationweather.gov) have failed for at least 15 minutes. The ATIS card shows no weather meanwhile.\n\nLast error: {error}\n\nCheck Home Assistant's internet connection. The exact error is under Settings > System > Logs, search for vatsim_atc.\n\nThis clears by itself when a lookup works, or when no METAR is wanted any more."
+    },
+    "position_not_restored": {
+      "title": "VATSIM saved aircraft position could not be read",
+      "description": "The tracker saves your aircraft's last position so the map shows it after a restart. The saved file exists but could not be used, so the map has no position until your next flight.\n\nError: {error}\n\nNothing needs doing: this clears by itself the next time a position is saved, which happens when you are next connected to VATSIM. If it comes back after every restart, please report it with the log lines for vatsim_atc."
+    },
+    "mute_gate_unavailable": {
+      "title": "VATSIM speech is held: the hold entity is unavailable",
+      "description": "Speech is set to play only while {entity} reads off. It has read {state} for at least 15 minutes, so every spoken VATSIM alert is being held. Pushes are still sent.\n\nFix that entity, or choose a different one (or none) under the integration's Configure button > Alerts.\n\nThis clears by itself when the entity reads on or off again."
+    },
+    "alert_delivery_failed": {
+      "title": "A VATSIM alert could not be delivered",
+      "description": "The last push or spoken alert failed:\n\n{error}\n\nCheck the targets under the integration's Configure button > Alerts: a phone that was renamed, a speaker that is offline or a text-to-speech engine that was removed are the usual causes. Then press Test alert on the VATSIM Tracker device.\n\nThis clears by itself the next time an alert or a test is delivered."
     }
   }
 }

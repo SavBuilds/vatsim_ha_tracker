@@ -1,7 +1,13 @@
 # Accepted hits for tools/pii_scan.py:  path-glob<TAB>pattern-or-seed<TAB>regex the line must match
+# The next three are for files as they were in earlier commits: the scan reads history too.
 packages/vatsim_user.example.yaml	media_player	media_player\.example_speaker_[12]\b
 packages/vatsim_user.example.yaml	notify-target	notify\.(persistent_notification|mobile_app_<device>)
 README.md	notify-target	notify\.mobile_app_<device>
+tests/test_alerts_with_stubs.py	mobile_app	mobile_app_(example|old)_phone\b
+tests/test_alerts_with_stubs.py	notify-target	notify\.(example_watch|mobile_app_example_phone)\b
+tests/test_alerts_with_stubs.py	media_player	media_player\.example_(desk|den)\b
+tests/test_problems.py	mobile_app	mobile_app_example\b
+tests/test_problems.py	media_player	media_player\.example\b
 custom_components/vatsim_atc/core/engine.py	key-assignment	_published_tokens\.get|No token: nothing written yet
 commit	email	^(author|committer|tagger) .* <\d+\+[A-Za-z0-9-]+@users\.noreply\.github\.com>
 apps/vatsim_atc_tracker/vatsim_atc_tracker.py	key-assignment	_published_tokens\.get|No token: AppDaemon restarted

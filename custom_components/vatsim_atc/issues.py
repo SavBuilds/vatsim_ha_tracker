@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from datetime import timedelta
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -25,8 +25,14 @@ PILOT_CONNECTED = "binary_sensor.vatsim_pilot_connected"
 
 
 class IssueReporter:
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, tracker: Tracker) -> None:
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, tracker: Tracker,
+                 alert_inputs: Optional[Callable[[], Mapping[str, Any]]] = None,
+                 on_raised: Optional[Callable[[str], None]] = None) -> None:
+        """alert_inputs supplies what the alert sender knows (the hold entity's state, a failed
+        delivery). on_raised is called once when a problem is first reported, not when its text
+        is updated."""
         self._hass, self._entry, self._tracker = hass, entry, tracker
+        self._alert_inputs, self._on_raised = alert_inputs, on_raised
         # Monotonic, so a clock correction cannot raise or hide anything and a resume from
         # suspend cannot raise anything.
         self._watch = ProblemWatch(started=time.monotonic())
@@ -48,11 +54,12 @@ class IssueReporter:
         # The attribute does not exist until the engine has set itself up on its worker.
         last_health_check = getattr(self._tracker, "last_health_check", None)
         active = self._watch.evaluate(time.monotonic(), published.get(FEED_HEALTH), pilot == "on",
-                                      last_health_check)
+                                      last_health_check, self._alert_inputs() if self._alert_inputs else None)
         for key, placeholders in active.items():
             signature = tuple(sorted(placeholders.items()))
             if self._raised.get(key) == signature:
                 continue
+            new = key not in self._raised
             ir.async_create_issue(
                 self._hass, DOMAIN, self._issue_id(key),
                 is_fixable=False, is_persistent=False,
@@ -61,6 +68,8 @@ class IssueReporter:
                 learn_more_url=f"{PROJECT_URL}#troubleshooting",
             )
             self._raised[key] = signature
+            if new and self._on_raised is not None:
+                self._on_raised(key)
         for key in [k for k in self._raised if k not in active]:
             ir.async_delete_issue(self._hass, DOMAIN, self._issue_id(key))
             del self._raised[key]

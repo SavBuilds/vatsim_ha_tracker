@@ -51,11 +51,13 @@ class _Hass:
     def __init__(self, loop, folder):
         self.loop, self.session, self.entities, self.stop_listeners = loop, _Session(), [], []
         self.issues, self.issue_events, self.intervals, self.data = {}, [], [], {}
+        self.later, self.tasks = [], []
+        self.states, self.entity_registry = ha_stubs.States(), ha_stubs.EntityRegistry()
         outer = self
         self.config = type("C", (), {"path": staticmethod(lambda *p: os.path.join(folder, *p))})()
         self.bus = type("B", (), {"async_listen_once": staticmethod(
             lambda event, cb: outer.stop_listeners.append((event, cb)) or (lambda: None))})()
-        self.services = type("S", (), {"async_call": staticmethod(lambda *a_, **k: asyncio.sleep(0))})()
+        self.services = ha_stubs.Services()
 
         class Entries:
             async def async_forward_entry_setups(self, entry, platforms):
@@ -72,6 +74,16 @@ class _Hass:
             async def async_unload_platforms(self, entry, platforms):
                 return True
         self.config_entries = Entries()
+
+    def async_create_task(self, coro, name=None, eager_start=True):
+        task = self.loop.create_task(coro)
+        self.tasks.append(task)
+        return task
+
+    async def settle(self):
+        """Wait for everything the integration started in the background."""
+        while self.tasks:
+            await self.tasks.pop(0)
 
     async def async_add_executor_job(self, func, *args):
         return await self.loop.run_in_executor(None, func, *args)
@@ -110,7 +122,7 @@ class Glue(unittest.IsolatedAsyncioTestCase):
 
     async def test_entities_show_what_the_engine_publishes(self):
         e = self.by_key
-        self.assertEqual(len(self.hass.entities), 10)
+        self.assertEqual(len(self.hass.entities), 15)   # 10 that show the engine, 5 for the alerts
         self.assertFalse(e["next_sector"].available)   # nothing published yet
         self.assertTrue(await until(lambda: e["next_sector"].extra_state_attributes.get("next_controller_callsign")))
         self.assertEqual(e["feed_health"].native_value, "healthy")
@@ -120,8 +132,8 @@ class Glue(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((e["aircraft"].latitude, e["aircraft"].longitude), (10.0, 23.0))
         self.assertEqual(e["next_sector"].extra_state_attributes["eta_text"], "7 min")
         for entity in self.hass.entities:
-            if entity is e["atis_airport"]:
-                continue
+            if not hasattr(entity, "_source_id"):
+                continue                               # the text box and the alert controls
             attrs = entity.extra_state_attributes
             self.assertFalse({"pub_token", "friendly_name"} & set(attrs), entity._attr_translation_key)
             self.assertGreater(entity.__dict__.get("writes", 0), 0, entity._attr_translation_key)
@@ -135,7 +147,8 @@ class Glue(unittest.IsolatedAsyncioTestCase):
             names = json.load(fh)["entity"]
         for entity in self.hass.entities:
             self.assertIn(entity._attr_translation_key, names[entity.platform_name])
-        self.assertEqual(sum(len(v) for v in names.values()), len(self.hass.entities))
+        # One name per entity, plus the name shared by the per-speaker switches (none set up here).
+        self.assertEqual(sum(len(v) for v in names.values()), len(self.hass.entities) + 1)
 
     async def test_typed_airport_drives_the_destination(self):
         e = self.by_key
@@ -180,7 +193,7 @@ class Glue(unittest.IsolatedAsyncioTestCase):
             # Boundaries lost, and navigation data expired, as the engine would publish them.
             state, attrs = tracker.published["sensor.vatsim_feed_health"]
             broken = dict(attrs, geometry_status="loading", last_geometry_refresh_error="OSError: no route",
-                          navdata_status="expired", navdata_cycle="2001", navdata_valid_until="2020-01-29")
+                          navdata_status="expired", navdata_days_expired=30, navdata_cycle="2001", navdata_valid_until="2020-01-29")
             freeze = tracker.set_state
             tracker.set_state = lambda *a_, **k: None                     # hold the engine's own publishes off
             tracker.published = {**tracker.published, "sensor.vatsim_feed_health": (state, broken)}
@@ -236,7 +249,7 @@ class Glue(unittest.IsolatedAsyncioTestCase):
         reporter = self.hass.data["vatsim_atc"]["entry1"]
         state, attrs = tracker.published["sensor.vatsim_feed_health"]
         tracker.published = {**tracker.published, "sensor.vatsim_feed_health": (
-            state, dict(attrs, navdata_status="expired", navdata_cycle="2001", navdata_valid_until="2020-01-29"))}
+            state, dict(attrs, navdata_status="expired", navdata_days_expired=30, navdata_cycle="2001", navdata_valid_until="2020-01-29"))}
         reporter.check()
         self.assertEqual(len(self.hass.issues), 1)
         # No unload callback has run: this is what Home Assistant does after a failed unload.

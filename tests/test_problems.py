@@ -44,7 +44,7 @@ class Rules(unittest.TestCase):
     def test_one_quiet_reading_is_not_a_stopped_tracker(self):
         # R20: the reporter can read fresh health together with the time of the check before
         # it. That lasts an instant, so a stall counts only when two checks in a row see it.
-        expired = dict(HEALTHY, navdata_status="expired", navdata_cycle="2001", navdata_valid_until="2020-01-29")
+        expired = dict(HEALTHY, navdata_status="expired", navdata_days_expired=30, navdata_cycle="2001", navdata_valid_until="2020-01-29")
         before = self.run_for(60, expired)
         now = T0 + 5000
         self.assertEqual(self.watch.evaluate(now, ("healthy", expired), False, now - 301), before)
@@ -91,7 +91,7 @@ class Rules(unittest.TestCase):
 
     def test_a_stopped_engine_is_reported_and_what_was_already_reported_stays(self):
         # R19: expired navdata must not be cleared by a stall and raised again after it.
-        expired = dict(HEALTHY, navdata_status="expired", navdata_cycle="2001", navdata_valid_until="2020-01-29")
+        expired = dict(HEALTHY, navdata_status="expired", navdata_days_expired=30, navdata_cycle="2001", navdata_valid_until="2020-01-29")
         before = self.run_for(60, expired)
         self.assertEqual(list(before), [problems.NAVDATA_EXPIRED])
         now = T0 + 5000
@@ -163,10 +163,18 @@ class Rules(unittest.TestCase):
         self.assertEqual(self.run_for(30, attrs, start=300), {problems.NAVDATA_NOT_LOADED: {
             "status": "active", "error": "UnicodeDecodeError: bad byte"}})
 
-    def test_expired_navdata_is_reported_at_once_with_its_cycle(self):
-        expired = dict(HEALTHY, navdata_status="expired", navdata_cycle="2001", navdata_valid_until="2020-01-29")
+    def test_expired_navdata_is_reported_with_its_cycle_and_last_day(self):
+        expired = dict(HEALTHY, navdata_status="expired", navdata_days_expired=30, navdata_cycle="2001", navdata_valid_until="2020-01-29")
         self.assertEqual(self.run_for(0, expired),
                          {problems.NAVDATA_EXPIRED: {"cycle": "2001", "valid_until": "2020-01-29"}})
+
+    def test_expired_navdata_is_not_reported_on_the_first_day_after_its_last(self):
+        for days, reported in ((0, False), (1, False), (2, True), (7, True), (40, True), (None, False)):
+            self.watch = problems.ProblemWatch(started=T0)
+            attrs = dict(HEALTHY, navdata_status="expired", navdata_cycle="2001", navdata_valid_until="2020-01-29")
+            attrs["navdata_days_expired"] = days
+            self.assertEqual(problems.NAVDATA_EXPIRED in self.run_for(600, attrs), reported, days)
+        self.assertEqual(problems.NAVDATA_EXPIRED_GRACE_DAYS, 2)
 
     def test_disabled_navdata_and_a_missing_geometry_status_are_not_problems(self):
         self.assertEqual(self.run_for(3600, dict(HEALTHY, navdata_status="disabled")), {})
@@ -183,7 +191,7 @@ class Rules(unittest.TestCase):
 
     def test_placeholders_are_strings_and_stable_between_checks(self):
         attrs = dict(HEALTHY, geometry_status="loading", last_geometry_refresh_error="X",
-                     navdata_status="expired", navdata_cycle=2001, consecutive_failures=1)
+                     navdata_status="expired", navdata_days_expired=30, navdata_cycle=2001, consecutive_failures=1)
         first = self.run_for(330, attrs)
         attrs["consecutive_failures"] = 99                    # a counter that moves every poll
         second = self.run_for(30, attrs, start=360)
@@ -191,6 +199,119 @@ class Rules(unittest.TestCase):
         self.assertEqual(len(first), 2)
         for placeholders in first.values():
             self.assertTrue(all(isinstance(v, str) for v in placeholders.values()))
+
+
+class RulesOutsideTheEngine(unittest.TestCase):
+    """The four problems added with the alerts: METAR, the saved position, the entity that
+    holds speech, and a failed delivery."""
+
+    def setUp(self):
+        self.watch = problems.ProblemWatch(started=T0)
+
+    def at(self, elapsed, attrs=HEALTHY, alerts=None, check=True):
+        now = T0 + elapsed
+        current = dict(attrs, last_success_ts=WALL + elapsed)
+        return self.watch.evaluate(now, ("healthy", current), False, now if check else T0, alerts)
+
+    def test_metar_failing_needs_fifteen_minutes_and_clears_when_no_metar_is_wanted(self):
+        failing = dict(HEALTHY, metar_status="error", last_metar_error="FetchError: 503")
+        for elapsed in range(0, problems.HOLD_METAR, 30):
+            self.assertEqual(self.at(elapsed, failing), {}, elapsed)
+        self.assertEqual(self.at(problems.HOLD_METAR, failing),
+                         {problems.METAR_FAILING: {"error": "FetchError: 503"}})
+        self.assertEqual(self.at(problems.HOLD_METAR + 30, dict(HEALTHY, metar_status="idle")), {})
+
+    def test_a_saved_position_that_could_not_be_read_is_reported_and_no_file_is_not(self):
+        self.assertEqual(self.at(0, dict(HEALTHY, last_aircraft_restore_error=None)), {})
+        self.assertEqual(self.at(30, dict(HEALTHY, last_aircraft_restore_error="ValueError: not JSON")),
+                         {problems.POSITION_NOT_RESTORED: {"error": "ValueError: not JSON"}})
+        self.assertEqual(self.at(60), {})
+
+    def test_the_hold_entity_is_reported_only_when_broken_for_fifteen_minutes(self):
+        for state in ("on", "off"):
+            self.watch = problems.ProblemWatch(started=T0)
+            for elapsed in (0, 3600):
+                self.assertEqual(self.at(elapsed, alerts={"gate": ("switch.example_hold", state)}), {}, state)
+        self.assertEqual(self.at(3630, alerts={"gate": None}), {})
+        broken = {"gate": ("switch.example_hold", "unavailable")}
+        self.watch = problems.ProblemWatch(started=T0)
+        for elapsed in range(0, problems.HOLD_MUTE_GATE, 30):
+            self.assertEqual(self.at(elapsed, alerts=broken), {}, elapsed)
+        self.assertEqual(self.at(problems.HOLD_MUTE_GATE, alerts=broken), {
+            problems.MUTE_GATE_UNAVAILABLE: {"entity": "switch.example_hold", "state": "unavailable"}})
+        self.assertEqual(self.at(problems.HOLD_MUTE_GATE + 30, alerts={"gate": ("switch.example_hold", "off")}), {})
+
+    def test_a_failed_delivery_is_reported_at_once_and_until_one_works(self):
+        failed = {"gate": None, "delivery_error": "push to mobile_app_example: ServiceNotFound"}
+        self.assertEqual(self.at(0, alerts=failed), {
+            problems.ALERT_DELIVERY_FAILED: {"error": "push to mobile_app_example: ServiceNotFound"}})
+        self.assertEqual(self.at(30, alerts={"gate": None, "delivery_error": None}), {})
+
+    def test_a_stopped_engine_does_not_hide_these(self):
+        # They do not come from the engine's health, so they are judged while it is silent.
+        failed = {"gate": None, "delivery_error": "speech on media_player.example: timeout"}
+        self.at(0)
+        for elapsed in (400, 430):
+            found = self.at(elapsed, alerts=failed, check=False)
+        self.assertEqual(sorted(found), [problems.ALERT_DELIVERY_FAILED, problems.TRACKER_STALLED])
+        self.assertEqual(self.at(460, alerts={"gate": None}, check=False), {problems.TRACKER_STALLED: {}})
+
+
+class EngineSavedPosition(unittest.TestCase):
+    def test_the_restore_error_is_set_for_a_bad_file_only_and_cleared_by_the_next_save(self):
+        import tempfile
+        from _harness import make_engine
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "last.json")
+            app = make_engine()
+            app._last_aircraft_path = lambda: path
+            load, save = type(app)._load_last_aircraft, type(app)._persist_last_aircraft
+            self.assertIsNone(load(app))                                # no file: a new install
+            self.assertIsNone(app._last_aircraft_restore_error)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("{ not json")
+            self.assertIsNone(load(app))
+            self.assertIn("Error", app._last_aircraft_restore_error)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write('{"attributes": {"latitude": 999, "longitude": 0}}')
+            app._last_aircraft_restore_error = None
+            self.assertIsNone(load(app))
+            self.assertEqual(app._last_aircraft_restore_error, "the saved file holds no valid position")
+            app._publish_feed_health(load_module_health(), 1000.0)
+            self.assertEqual(app.states["sensor.vatsim_feed_health"][1]["last_aircraft_restore_error"],
+                             "the saved file holds no valid position")
+            app._last_aircraft_attrs = {"latitude": 10.0, "longitude": 20.0, "cid": "1234567"}
+            save(app, force=True)
+            self.assertIsNone(app._last_aircraft_restore_error)
+            self.assertEqual(load(app)["latitude"], 10.0)
+
+
+def load_module_health():
+    return load("core.engine").FeedHealth.HEALTHY
+
+
+class EngineNavdataExpiry(unittest.TestCase):
+    def test_days_expired_count_from_the_last_valid_day_by_the_utc_date(self):
+        from datetime import datetime, timedelta, timezone
+        from _harness import make_engine
+        engine = load("core.engine")
+        app = make_engine()
+        app.navdata_path = "/somewhere"
+        today = datetime.now(timezone.utc).date()
+
+        def loaded(valid_until):
+            app._navdata = engine.NavDataSnapshot(
+                version=1, fix_coords={"AAAAA": ((1.0, 2.0),)}, airport_coords={}, airway_graph={},
+                loaded_at=1.0, load_issue_count=0, cycle="2001", valid_until=valid_until, source_mtime=1.0)
+            return app._navdata_days_expired(), app._compute_navdata_status()
+        self.assertEqual(loaded((today + timedelta(days=3)).isoformat()), (0, "active"))
+        self.assertEqual(loaded(today.isoformat()), (0, "active"))            # the last day is still valid
+        self.assertEqual(loaded((today - timedelta(days=1)).isoformat()), (1, "expired"))
+        self.assertEqual(loaded((today - timedelta(days=9)).isoformat()), (9, "expired"))
+        self.assertEqual(loaded(None), (0, "active"))
+        self.assertEqual(loaded("not a date"), (0, "active"))
+        app._publish_feed_health(engine.FeedHealth.HEALTHY, 1000.0)
+        self.assertEqual(app.states["sensor.vatsim_feed_health"][1]["navdata_days_expired"], 0)
 
 
 class EngineHeartbeat(unittest.TestCase):
@@ -264,10 +385,12 @@ class Texts(unittest.TestCase):
         # What the rules actually supply, taken from the rules: everything wrong at once.
         watch = problems.ProblemWatch(started=T0)
         wrong = {"last_success_ts": 0, "consecutive_failures": 3, "timestamp_status": "processing_error",
-                 "geometry_status": "loading", "navdata_status": "configured_but_empty"}
+                 "geometry_status": "loading", "navdata_status": "configured_but_empty",
+                 "metar_status": "error", "last_aircraft_restore_error": "ValueError: not JSON"}
+        outside = {"gate": ("binary_sensor.example_hold", "unavailable"), "delivery_error": "push to x: failed"}
         for elapsed in (0, 3600):
-            raised = watch.evaluate(T0 + elapsed, ("unavailable", wrong), True, T0 + elapsed)
-        raised.update(watch.evaluate(T0 + 3630, ("healthy", dict(HEALTHY, navdata_status="expired")), True, T0 + 3630))
+            raised = watch.evaluate(T0 + elapsed, ("unavailable", wrong), True, T0 + elapsed, outside)
+        raised.update(watch.evaluate(T0 + 3630, ("healthy", dict(HEALTHY, navdata_status="expired", navdata_days_expired=30)), True, T0 + 3630))
         stopped = problems.ProblemWatch(started=T0)
         for elapsed in (301, 331):
             raised.update(stopped.evaluate(T0 + elapsed, None, False, None))
@@ -281,6 +404,9 @@ class Texts(unittest.TestCase):
             wanted = set(re.findall(r"\{(\w+)\}", issues[key]["title"] + issues[key]["description"]))
             self.assertEqual(wanted, provided.get(key, set()), key)
         self.assertTrue(problems.ERRORS <= set(problems.ALL))
+        self.assertEqual(sorted(problems.PUSH_TITLES), sorted(problems.ALL))
+        for key in problems.ALL:                       # a push says what the repair's title says
+            self.assertEqual(problems.PUSH_TITLES[key], issues[key]["title"], key)
 
 
 if __name__ == "__main__":

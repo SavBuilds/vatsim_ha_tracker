@@ -15,14 +15,16 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .const import DOMAIN, USER_AGENT, engine_args, signal_for
+from .alerts import AlertManager
 from .host import Tracker
 from .issues import IssueReporter
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.BINARY_SENSOR, Platform.DEVICE_TRACKER, Platform.SENSOR, Platform.TEXT]
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.DEVICE_TRACKER, Platform.SELECT,
+             Platform.SENSOR, Platform.SWITCH, Platform.TEXT]
 
-VatsimConfigEntry = ConfigEntry  # runtime_data is the Tracker
+VatsimConfigEntry = ConfigEntry  # runtime_data is the Tracker; tracker.alerts is the AlertManager
 
 
 def _last_aircraft_file(hass: HomeAssistant, entry_id: str) -> str:
@@ -57,14 +59,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: VatsimConfigEntry) -> bo
         raise ConfigEntryError(str(err)) from err
 
     entry.runtime_data = tracker
+    # The alert sender exists before the platforms: the alert mode select and the switches
+    # restore their last values into it.
+    alerts = AlertManager(hass, entry, tracker)
+    tracker.alerts = alerts
     # Platforms first: the ATIS airport text entity restores its value before the engine reads it.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    alerts.start()
+    entry.async_on_unload(alerts.stop)
     tracker.start()
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     # Repairs issues for things the user should know about (feed unreachable, boundaries or
     # navigation data not loaded, ...). Stopped and cleared when the entry unloads.
-    reporter = IssueReporter(hass, entry, tracker)
+    reporter = IssueReporter(hass, entry, tracker, alerts.problem_inputs, alerts.problem_raised)
     reporter.start()
     # Kept where async_remove_entry can find it: Home Assistant removes an entry even when
     # its unload failed, and then the unload callbacks below never run.
@@ -107,6 +115,8 @@ async def async_remove_entry(hass: HomeAssistant, entry: VatsimConfigEntry) -> N
         reporter.stop()
     tracker = getattr(entry, "runtime_data", None)
     if tracker is not None:
+        if getattr(tracker, "alerts", None) is not None:
+            tracker.alerts.stop()                              # safe to call twice
         await hass.async_add_executor_job(tracker.shutdown)   # returns at once if already stopped
     path = _last_aircraft_file(hass, entry.entry_id)
 

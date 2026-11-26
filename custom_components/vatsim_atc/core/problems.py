@@ -31,6 +31,16 @@ STALE_IDLE_SECONDS = 900
 # The engine finishes a health check on every poll, at most about a minute apart. None for
 # this long means it has stopped, or can no longer report its own health.
 STALLED_SECONDS = 300
+# Days past the last day of the loaded AIRAC cycle before it is reported. The cycle ends at a
+# UTC date line, which is the evening before in the Americas, and nobody replaces their files
+# that minute: reporting at once is noise. 2 means the second UTC day after the last valid
+# one, so at least 24 hours after the cycle ended. The engine's own status still reads
+# "expired" from the first day, for anyone who wants to show it.
+NAVDATA_EXPIRED_GRACE_DAYS = 2
+# A METAR was wanted and both sources have failed for this long. One failed refresh is not it.
+HOLD_METAR = 900
+# The entity that holds speech is missing or unavailable. Speech is silently held meanwhile.
+HOLD_MUTE_GATE = 900
 
 FEED_UNREACHABLE = "feed_unreachable"
 FEED_STALE = "feed_stale"
@@ -39,9 +49,28 @@ PROCESSING_ERROR = "processing_error"
 BOUNDARIES_NOT_LOADED = "boundaries_not_loaded"
 NAVDATA_NOT_LOADED = "navdata_not_loaded"
 NAVDATA_EXPIRED = "navdata_expired"
+METAR_FAILING = "metar_failing"
+POSITION_NOT_RESTORED = "position_not_restored"
+MUTE_GATE_UNAVAILABLE = "mute_gate_unavailable"
+ALERT_DELIVERY_FAILED = "alert_delivery_failed"
 
 ALL = (FEED_UNREACHABLE, FEED_STALE, TRACKER_STALLED, PROCESSING_ERROR, BOUNDARIES_NOT_LOADED,
-       NAVDATA_NOT_LOADED, NAVDATA_EXPIRED)
+       NAVDATA_NOT_LOADED, NAVDATA_EXPIRED, METAR_FAILING, POSITION_NOT_RESTORED, MUTE_GATE_UNAVAILABLE,
+       ALERT_DELIVERY_FAILED)
+# What a push for each problem says. The full text is in the repair itself.
+PUSH_TITLES = {
+    FEED_UNREACHABLE: "VATSIM feed has not been reachable since the tracker started",
+    FEED_STALE: "VATSIM feed is not updating",
+    TRACKER_STALLED: "VATSIM tracker has stopped",
+    PROCESSING_ERROR: "VATSIM tracker cannot process the feed",
+    BOUNDARIES_NOT_LOADED: "VATSIM sector boundaries are not loaded",
+    NAVDATA_NOT_LOADED: "VATSIM navigation data did not load",
+    NAVDATA_EXPIRED: "VATSIM navigation data has expired",
+    METAR_FAILING: "VATSIM METAR lookups are failing",
+    POSITION_NOT_RESTORED: "VATSIM saved aircraft position could not be read",
+    MUTE_GATE_UNAVAILABLE: "VATSIM speech is held: the hold entity is unavailable",
+    ALERT_DELIVERY_FAILED: "A VATSIM alert could not be delivered",
+}
 # The tracker is not doing its job at all. Everything else is a degraded feature.
 ERRORS = frozenset({FEED_UNREACHABLE, TRACKER_STALLED, PROCESSING_ERROR})
 
@@ -77,14 +106,20 @@ class ProblemWatch:
         return now - self._since.setdefault(key, now) >= hold
 
     def evaluate(self, now: float, health: Optional[Health], pilot_connected: bool,
-                 last_health_check: Optional[float]) -> Dict[str, Dict[str, str]]:
+                 last_health_check: Optional[float],
+                 alerts: Optional[Mapping[str, Any]] = None) -> Dict[str, Dict[str, str]]:
         """Active problems, each with the text to fill into its message. Placeholders are kept
         to values that do not change every poll, so an issue is not rewritten constantly.
 
         now and last_health_check are monotonic seconds. last_health_check is when the engine
         last finished working out its health, whether or not anything changed; other entities
         being published does not count, or a fault in the health report itself would be hidden.
+
+        alerts is what the alert sender knows and the engine does not: "gate" is
+        (entity id, its state) when an entity holds speech, and "delivery_error" is the text
+        of the last push or speech call that failed, until one works again.
         """
+        outside = self._outside(now, alerts or {})
         quiet_for = now - (last_health_check if last_health_check is not None else self._started)
         quiet, quiet_before = quiet_for > STALLED_SECONDS, self._quiet_before
         self._quiet_before = quiet
@@ -92,14 +127,14 @@ class ProblemWatch:
             # The caller reads the health and the time of its last check one after the other,
             # from another thread, and can catch the moment between the two being written.
             # One quiet reading changes nothing; the next check, 30 s on, settles it.
-            return dict(self._active)
+            return {**self._active, **outside}
         if quiet:
             # What was last published is stale, so nothing can be judged from it. Problems
             # already reported stay as they are: clearing them here and raising them again
             # afterwards would notify twice for one fault.
-            return {**self._active, TRACKER_STALLED: {}}
+            return {**self._active, **outside, TRACKER_STALLED: {}}
         if health is None:
-            return {}                     # nothing published yet, and still inside the grace time
+            return outside                # nothing published yet, and still inside the grace time
         _state, attrs = health
         active: Dict[str, Dict[str, str]] = {}
 
@@ -142,9 +177,27 @@ class ProblemWatch:
             active[NAVDATA_NOT_LOADED] = {
                 "status": _text(navdata, "unknown"),
                 "error": navdata_error or "no error was recorded"}
-        if navdata == "expired":
+        if navdata == "expired" and _number(attrs.get("navdata_days_expired")) >= NAVDATA_EXPIRED_GRACE_DAYS:
             active[NAVDATA_EXPIRED] = {
                 "cycle": _text(attrs.get("navdata_cycle"), "unknown"),
                 "valid_until": _text(attrs.get("navdata_valid_until"), "an unknown date")}
+        if self._held(METAR_FAILING, attrs.get("metar_status") == "error", now, HOLD_METAR):
+            active[METAR_FAILING] = {"error": _text(attrs.get("last_metar_error"), "no error was recorded")}
+        restore_error = _text(attrs.get("last_aircraft_restore_error"), "")
+        if restore_error:
+            active[POSITION_NOT_RESTORED] = {"error": restore_error}
         self._active = active
-        return active
+        return {**active, **outside}
+
+    def _outside(self, now: float, alerts: Mapping[str, Any]) -> Dict[str, Dict[str, str]]:
+        """Problems that do not come from the engine's health, so a stopped engine neither
+        hides nor freezes them."""
+        found: Dict[str, Dict[str, str]] = {}
+        gate = alerts.get("gate")
+        broken = gate is not None and gate[1] not in ("on", "off")
+        if self._held(MUTE_GATE_UNAVAILABLE, broken, now, HOLD_MUTE_GATE):
+            found[MUTE_GATE_UNAVAILABLE] = {"entity": _text(gate[0], "unknown"), "state": _text(gate[1], "missing")}
+        delivery_error = _text(alerts.get("delivery_error"), "")
+        if delivery_error:
+            found[ALERT_DELIVERY_FAILED] = {"error": delivery_error}
+        return found

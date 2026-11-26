@@ -1,7 +1,7 @@
 """Constants for the VATSIM ATC Tracker integration. No Home Assistant imports."""
 
 DOMAIN = "vatsim_atc"
-VERSION = "2.0.0b10"
+VERSION = "2.0.0b11"
 PROJECT_URL = "https://github.com/SavBuilds/vatsim_ha_tracker"
 USER_AGENT = f"vatsim_ha_tracker/{VERSION} (+{PROJECT_URL})"
 
@@ -13,6 +13,21 @@ CONF_METAR_FALLBACK = "metar_fallback"
 
 # Option keys are the engine's own config keys, so options pass straight through.
 OPTION_KEYS = (CONF_NAVDATA_PATH, CONF_SIMAWARE_PATH, CONF_LOOKAHEAD_MINUTES, CONF_METAR_FALLBACK)
+
+# Alert options. These stay in the integration; the engine never sees them.
+CONF_NOTIFY_TARGETS = "notify_targets"
+CONF_SPEAKERS = "speakers"
+CONF_TTS_ENTITY = "tts_entity"
+CONF_MUTE_GATE = "mute_gate_entity"
+CONF_PUSH_REPAIRS = "push_repairs"
+ALERT_OPTION_KEYS = (CONF_NOTIFY_TARGETS, CONF_SPEAKERS, CONF_TTS_ENTITY, CONF_MUTE_GATE, CONF_PUSH_REPAIRS)
+# A push target is a notify action ("service:<action name>") or a notify entity
+# ("entity:<entity id>"). The prefix says which, because the two share one namespace.
+SERVICE_TARGET_PREFIX = "service:"
+ENTITY_TARGET_PREFIX = "entity:"
+SIDEBAR_TARGET = SERVICE_TARGET_PREFIX + "persistent_notification"
+# Until the user chooses: a notice in the sidebar, which every install has.
+DEFAULT_NOTIFY_TARGETS = (SIDEBAR_TARGET,)
 
 DEVICE_NAME = "VATSIM Tracker"
 
